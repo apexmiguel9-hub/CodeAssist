@@ -44,6 +44,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -193,8 +194,9 @@ fun BlockEditor(
             }
         }
     }
-    val ctx = remember(projectedText, editing, selected, drag) {
-        Ctx(path, backend, scope, projectedText, editing, selected?.blockId, drag, { editing = it }, { selected = it }, applyEdit, { paletteOpen = true }, { focusStack = focusStack + it })
+    val defaultInsert = remember(tree) { tree?.let(::defaultInsertTarget) }
+    val ctx = remember(projectedText, editing, selected, drag, defaultInsert) {
+        Ctx(path, backend, scope, projectedText, editing, selected?.blockId, drag, defaultInsert, { editing = it }, { selected = it }, applyEdit, { paletteOpen = true }, { focusStack = focusStack + it })
     }
 
     Box(modifier.background(Ide.colors.editorBg).canvasOrigin(drag)) {
@@ -205,6 +207,11 @@ fun BlockEditor(
                 current == null -> Hint(stringResource(Res.string.block_projecting))
                 else -> Box(
                     Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())
+                        .then(
+                            ctx.defaultInsert?.let { t ->
+                                Modifier.dropZone(ctx.drag, t).canvasInsertionLine(ctx.drag.hovered == t)
+                            } ?: Modifier
+                        )
                         .clickable(remember { MutableInteractionSource() }, null) { ctx.select(null) }
                         .padding(14.dp),
                 ) { PuzzleCanvas(current, ctx) }
@@ -953,8 +960,8 @@ private fun Palette(ctx: Ctx, onClose: () -> Unit) {
             PaletteSearch(query) { query = it }
             val statics = if (query.isBlank()) PALETTE else PALETTE.filter { it.label.contains(query.trim(), ignoreCase = true) }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                statics.forEach { item -> PaletteBlock(stringResource(item.labelRes), item.ghost, item.cat, item.text, ctx) }
-                hits.forEach { (hit, fromMembers) -> PaletteBlock(hit.name, hit.detail, BlockCat.Call, templateFor(hit, fromMembers), ctx) }
+                statics.forEach { item -> PaletteBlock(stringResource(item.labelRes), item.ghost, item.cat, item.text, ctx, onClose) }
+                hits.forEach { (hit, fromMembers) -> PaletteBlock(hit.name, hit.detail, BlockCat.Call, templateFor(hit, fromMembers), ctx, onClose) }
             }
             when {
                 searching -> Text(stringResource(Res.string.block_searching_index), color = MaterialTheme.colorScheme.outline, style = MaterialTheme.typography.bodySmall)
@@ -986,15 +993,26 @@ private fun PaletteSearch(query: String, onQuery: (String) -> Unit) {
     }
 }
 
-/** One draggable palette block (static or index hit): drop on a statement gap to insert [text]. */
+/** One draggable palette block (static or index hit): drop on a statement gap — or anywhere on the canvas —
+ *  to insert [text]; a plain tap inserts at the canvas's default landing spot too. */
 @Composable
-private fun PaletteBlock(label: String, ghost: String, cat: BlockCat, text: String, ctx: Ctx) {
+private fun PaletteBlock(label: String, ghost: String, cat: BlockCat, text: String, ctx: Ctx, onClose: () -> Unit) {
     val color = blockColor(cat)
     val shape = rememberBlockShape(notchTop = true, bumpBottom = true)
     Column(
         Modifier.widthIn(min = 150.dp).clip(shape).background(color, shape)
             .dragSource(ctx.drag, { DragPayload.Template(label, text, cat) }) { drop ->
-                if (drop is DropDescriptor.StatementGap) ctx.apply(UiBlockEdit.InsertTemplate(drop.ownerId, drop.slotIndex, drop.index, text))
+                when (drop) {
+                    is DropDescriptor.StatementGap -> ctx.apply(UiBlockEdit.InsertTemplate(drop.ownerId, drop.slotIndex, drop.index, text))
+                    is DropDescriptor.CanvasEnd -> ctx.apply(UiBlockEdit.InsertTemplate(drop.ownerId, drop.slotIndex, drop.index, text))
+                    else -> {}
+                }
+            }
+            .clickable(remember(label) { MutableInteractionSource() }, null) {
+                ctx.defaultInsert?.let { d ->
+                    ctx.apply(UiBlockEdit.InsertTemplate(d.ownerId, d.slotIndex, d.index, text))
+                    onClose()
+                }
             }
             .padding(start = 13.dp, end = 13.dp, top = 8.dp, bottom = 8.dp + BlockMetrics.connDepth),
         verticalArrangement = Arrangement.spacedBy(1.dp),
@@ -1064,6 +1082,8 @@ internal class Ctx(
     val editing: EditTarget?,
     val selectedId: String?,
     val drag: DragState,
+    /** Where a palette insert lands when nothing is selected — end of the first method body (or null). */
+    val defaultInsert: DropDescriptor.CanvasEnd?,
     val startEdit: (EditTarget?) -> Unit,
     val select: (Selection?) -> Unit,
     private val applyEdit: (UiBlockEdit, List<UiTextEdit>) -> Unit,
@@ -1094,6 +1114,16 @@ private fun bodySlotIndex(node: UiBlockNode): Int {
     val slots = node.parts.filterIsInstance<UiBlockPart.Slot>()
     slots.indexOfFirst { it.multiple }.takeIf { it >= 0 }?.let { return it }
     return slots.indexOfFirst { s -> s.children.singleOrNull()?.kind == "block" }
+}
+
+/** The append position for a bare-canvas/palette-tap insert: end of the FIRST method body (if any). */
+private fun defaultInsertTarget(file: UiBlockNode): DropDescriptor.CanvasEnd? {
+    val tops = bodyChildren(file)?.children ?: listOf(file)
+    val cls = tops.firstOrNull { it.label == "class" }
+    val members = cls?.let { bodyChildren(it)?.children } ?: emptyList()
+    val method = members.firstOrNull { it.label == "method" }
+    val body = method?.let { bodyChildren(it) }
+    return if (body != null) DropDescriptor.CanvasEnd(body.ownerId, body.slotIndex, body.children.size) else null
 }
 
 private fun slotIndexInNode(node: UiBlockNode, part: UiBlockPart): Int =
@@ -1146,6 +1176,12 @@ private fun InterlockColumn(modifier: Modifier = Modifier, content: @Composable 
 private fun Modifier.insertionLine(show: Boolean): Modifier = composed {
     val accent = MaterialTheme.colorScheme.primary
     if (!show) this else this.drawBehind { drawRect(accent, size = Size(size.width, 2.dp.toPx())) }
+}
+
+/** A 2px accent line along the BOTTOM edge — feedback for the whole-canvas insert landing spot. */
+private fun Modifier.canvasInsertionLine(show: Boolean): Modifier = composed {
+    val accent = MaterialTheme.colorScheme.primary
+    if (!show) this else this.drawBehind { drawRect(accent, topLeft = Offset(0f, size.height - 2.dp.toPx()), size = Size(size.width, 2.dp.toPx())) }
 }
 
 /** A dashed rounded border (Compose has no dashed [androidx.compose.foundation.border]). */
@@ -1559,7 +1595,7 @@ private fun SamplePreview(dark: Boolean, sample: () -> Pair<UiBlockNode, String>
     CodeAssistTheme(dark = dark) {
         val drag = remember { DragState() }
         val scope = rememberCoroutineScope()
-        val ctx = remember { Ctx("/preview/Sample.java", PreviewBackend, scope, src, null, null, drag, {}, {}, { _, _ -> }, {}) }
+        val ctx = remember { Ctx("/preview/Sample.java", PreviewBackend, scope, src, null, null, drag, null, {}, {}, { _, _ -> }, {}) }
         Box(Modifier.width(380.dp).heightIn(min = 560.dp).background(Ide.colors.editorBg).padding(14.dp)) {
             PuzzleCanvas(file, ctx)
         }
@@ -1588,7 +1624,7 @@ private fun PreviewBlockPalette() {
     CodeAssistTheme(dark = true) {
         val drag = remember { DragState() }
         val scope = rememberCoroutineScope()
-        val ctx = remember { Ctx("/preview/Sample.java", PreviewBackend, scope, "", null, null, drag, {}, {}, { _, _ -> }, {}) }
+        val ctx = remember { Ctx("/preview/Sample.java", PreviewBackend, scope, "", null, null, drag, null, {}, {}, { _, _ -> }, {}) }
         Box(Modifier.width(380.dp).height(440.dp).background(MaterialTheme.colorScheme.background)) {
             Palette(ctx) {}
         }

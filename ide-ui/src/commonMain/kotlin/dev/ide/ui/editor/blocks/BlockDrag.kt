@@ -73,6 +73,8 @@ sealed interface DropDescriptor {
     data class StatementGap(val ownerId: String, val slotIndex: Int, val index: Int) : DropDescriptor
     /** A value input — replace its content with the dropped value's text. */
     data class ValueSocket(val ownerId: String, val slotIndex: Int) : DropDescriptor
+    /** The bare canvas (anything not over a block/ghost/socket) — inserts [index] into [ownerId]'s slot. */
+    data class CanvasEnd(val ownerId: String, val slotIndex: Int, val index: Int) : DropDescriptor
     /** The trash — delete the dragged block. */
     object Trash : DropDescriptor
 }
