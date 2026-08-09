@@ -9,6 +9,7 @@ import dev.ide.android.support.index.AndroidResourceIndex
 import dev.ide.android.support.metadata.AndroidSdkMetadata
 import dev.ide.block.BLOCK_MAPPING_EP
 import dev.ide.block.impl.JavaBlockMapping
+import dev.ide.block.impl.KotlinBlockMapping
 import dev.ide.core.actions.BuiltInActions
 import dev.ide.core.completion.BufferWordsContributor
 import dev.ide.core.completion.CompletionStats
@@ -275,12 +276,13 @@ private class JavaSupportPlugin : Plugin {
 }
 
 /**
- * The projectional (block) editor: contributes the Java block decomposition ([JavaBlockMapping]) onto
- * [BLOCK_MAPPING_EP], the one thing that makes the Code/Blocks toggle do anything. Non-essential — disabling
- * it drops the only block mapping, so the engine's [dev.ide.core.services.BlockService] reports no mappings and
- * the UI hides the Blocks view-mode segment (the whole feature turns off through this one decision). The
- * generic projection plumbing (the WORKSPACE-scoped `BlockService`) stays in [IdeCoreServicesPlugin]; with no
- * mapping registered it is simply inert.
+ * The projectional (block) editor: contributes the Java and Kotlin block decompositions
+ * ([JavaBlockMapping], [KotlinBlockMapping]) onto [BLOCK_MAPPING_EP], the things that make the
+ * Code/Blocks toggle do anything. Non-essential — disabling it drops the only block mappings, so the
+ * engine's [dev.ide.core.services.BlockService] reports no mappings and the UI hides the Blocks view-mode
+ * segment (the whole feature turns off through this one decision). The generic projection plumbing (the
+ * WORKSPACE-scoped `BlockService`) stays in [IdeCoreServicesPlugin]; with no mapping registered it is
+ * simply inert.
  */
 private class BlocksPlugin : Plugin {
     override val manifest = PluginManifest(
@@ -289,6 +291,7 @@ private class BlocksPlugin : Plugin {
     )
     override fun register(reg: PluginRegistration) {
         reg.register(BLOCK_MAPPING_EP, JavaBlockMapping)
+        reg.register(BLOCK_MAPPING_EP, KotlinBlockMapping)
     }
 }
 

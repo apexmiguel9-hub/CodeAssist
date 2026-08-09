@@ -918,16 +918,25 @@ private fun BlockBar(drag: DragState, onAddBlock: () -> Unit) {
 // text shown on the block (and in the drag preview).
 private data class PaletteItem(val label: String, val labelRes: StringResource, val cat: BlockCat, val ghost: String, val text: String)
 
-private val PALETTE = listOf(
-    PaletteItem("If", Res.string.block_palette_if, BlockCat.Control, "if ( ) { }", "if (true) {\n}"),
-    PaletteItem("If / Else", Res.string.block_palette_if_else, BlockCat.Control, "if ( ) { } else { }", "if (true) {\n} else {\n}"),
-    PaletteItem("For each", Res.string.block_palette_for_each, BlockCat.Control, "for ( : ) { }", "for (var item : items) {\n}"),
-    PaletteItem("While", Res.string.block_palette_while, BlockCat.Control, "while ( ) { }", "while (true) {\n}"),
-    PaletteItem("Return", Res.string.block_palette_return, BlockCat.Return, "return ;", "return value;"),
-    PaletteItem("Variable", Res.string.block_palette_variable, BlockCat.Data, "var = ;", "var name = value;"),
-    PaletteItem("Call", Res.string.block_palette_call, BlockCat.Call, "method();", "method();"),
-    PaletteItem("Comment", Res.string.block_palette_comment, BlockCat.Comment, "// …", "// comment"),
-)
+private fun isKotlin(path: String): Boolean =
+    path.endsWith(".kt", ignoreCase = true) || path.endsWith(".kts", ignoreCase = true)
+
+/** The static palette — Java or Kotlin template text, since the projection inserts the template verbatim. */
+private fun paletteFor(path: String): List<PaletteItem> {
+    val kotlin = isKotlin(path)
+    return listOf(
+        PaletteItem("If", Res.string.block_palette_if, BlockCat.Control, "if ( ) { }", "if (true) {\n}"),
+        PaletteItem("If / Else", Res.string.block_palette_if_else, BlockCat.Control, "if ( ) { } else { }", "if (true) {\n} else {\n}"),
+        PaletteItem("For each", Res.string.block_palette_for_each, BlockCat.Control,
+            if (kotlin) "for ( in ) { }" else "for ( : ) { }",
+            if (kotlin) "for (item in items) {\n}" else "for (var item : items) {\n}"),
+        PaletteItem("While", Res.string.block_palette_while, BlockCat.Control, "while ( ) { }", "while (true) {\n}"),
+        PaletteItem("Return", Res.string.block_palette_return, BlockCat.Return, "return ;", if (kotlin) "return value" else "return value;"),
+        PaletteItem("Variable", Res.string.block_palette_variable, BlockCat.Data, "= ;", if (kotlin) "val name = value" else "var name = value;"),
+        PaletteItem("Call", Res.string.block_palette_call, BlockCat.Call, "method();", if (kotlin) "method()" else "method();"),
+        PaletteItem("Comment", Res.string.block_palette_comment, BlockCat.Comment, "// …", "// comment"),
+    )
+}
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -958,7 +967,7 @@ private fun Palette(ctx: Ctx, onClose: () -> Unit) {
                 Icon(CaIcons.close, stringResource(Res.string.close), Modifier.size(18.dp).clickable(remember { MutableInteractionSource() }, null, onClick = onClose), tint = MaterialTheme.colorScheme.outline)
             }
             PaletteSearch(query) { query = it }
-            val statics = if (query.isBlank()) PALETTE else PALETTE.filter { it.label.contains(query.trim(), ignoreCase = true) }
+            val statics = if (query.isBlank()) paletteFor(ctx.path) else paletteFor(ctx.path).filter { it.label.contains(query.trim(), ignoreCase = true) }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 statics.forEach { item -> PaletteBlock(stringResource(item.labelRes), item.ghost, item.cat, item.text, ctx, onClose) }
                 hits.forEach { (hit, fromMembers) -> PaletteBlock(hit.name, hit.detail, BlockCat.Call, templateFor(hit, fromMembers), ctx, onClose) }

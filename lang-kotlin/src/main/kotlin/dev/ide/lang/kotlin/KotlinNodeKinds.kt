@@ -60,6 +60,33 @@ object KotlinNodeKinds {
     /** Constructor `constructor(...)` / the primary constructor. */
     val CONSTRUCTOR = NodeKind("kt.constructor")
 
+    /** The class body bracket (`{ … }`) — kept distinct so the block projection makes it a member list. */
+    val CLASS_BODY = NodeKind("kt.class_body")
+
+    /** `if (…) … else …` — Kotlin's if is an expression, so it has no neutral statement kind. */
+    val IF = NodeKind("kt.if")
+
+    /** `for (x in xs) …`. */
+    val FOR = NodeKind("kt.for")
+
+    /** `while (…) …`. */
+    val WHILE = NodeKind("kt.while")
+
+    /** `do … while (…)`. */
+    val DO_WHILE = NodeKind("kt.do_while")
+
+    /** `return …`. */
+    val RETURN = NodeKind("kt.return")
+
+    /** `throw …`. */
+    val THROW = NodeKind("kt.throw")
+
+    /** `try … catch (…) … finally …`. */
+    val TRY = NodeKind("kt.try")
+
+    /** The `super` receiver in `super.onCreate(...)`. */
+    val SUPER_EXPRESSION = NodeKind("kt.super_expression")
+
     /** Any adapted KtElement without a more specific kind; keeps the tree total. */
     val OTHER = NodeKind("kt.element")
 }

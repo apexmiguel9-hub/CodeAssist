@@ -14,11 +14,15 @@ import dev.ide.vfs.VirtualFile
 import org.jetbrains.kotlin.psi.KtBinaryExpression
 import org.jetbrains.kotlin.psi.KtBlockExpression
 import org.jetbrains.kotlin.psi.KtCallExpression
+import org.jetbrains.kotlin.psi.KtClassBody
 import org.jetbrains.kotlin.psi.KtClassOrObject
 import org.jetbrains.kotlin.psi.KtConstantExpression
+import org.jetbrains.kotlin.psi.KtDoWhileExpression
 import org.jetbrains.kotlin.psi.KtDotQualifiedExpression
 import org.jetbrains.kotlin.psi.KtElement
 import org.jetbrains.kotlin.psi.KtFile
+import org.jetbrains.kotlin.psi.KtForExpression
+import org.jetbrains.kotlin.psi.KtIfExpression
 import org.jetbrains.kotlin.psi.KtImportDirective
 import org.jetbrains.kotlin.psi.KtLambdaExpression
 import org.jetbrains.kotlin.psi.KtNameReferenceExpression
@@ -28,12 +32,17 @@ import org.jetbrains.kotlin.psi.KtPackageDirective
 import org.jetbrains.kotlin.psi.KtParameter
 import org.jetbrains.kotlin.psi.KtPrimaryConstructor
 import org.jetbrains.kotlin.psi.KtProperty
+import org.jetbrains.kotlin.psi.KtReturnExpression
 import org.jetbrains.kotlin.psi.KtSafeQualifiedExpression
 import org.jetbrains.kotlin.psi.KtSecondaryConstructor
 import org.jetbrains.kotlin.psi.KtStringTemplateExpression
+import org.jetbrains.kotlin.psi.KtSuperExpression
+import org.jetbrains.kotlin.psi.KtThrowExpression
+import org.jetbrains.kotlin.psi.KtTryExpression
 import org.jetbrains.kotlin.psi.KtTypeAlias
 import org.jetbrains.kotlin.psi.KtTypeReference
 import org.jetbrains.kotlin.psi.KtWhenExpression
+import org.jetbrains.kotlin.psi.KtWhileExpression
 import java.util.IdentityHashMap
 
 /**
@@ -71,6 +80,15 @@ private fun kindOf(psi: PsiElement): NodeKind = when {
     psi is KtLambdaExpression -> KotlinNodeKinds.LAMBDA
     psi is KtWhenExpression -> KotlinNodeKinds.WHEN
     psi is KtBinaryExpression -> KotlinNodeKinds.BINARY
+    psi is KtClassBody -> KotlinNodeKinds.CLASS_BODY
+    psi is KtIfExpression -> KotlinNodeKinds.IF
+    psi is KtForExpression -> KotlinNodeKinds.FOR
+    psi is KtWhileExpression -> KotlinNodeKinds.WHILE
+    psi is KtDoWhileExpression -> KotlinNodeKinds.DO_WHILE
+    psi is KtReturnExpression -> KotlinNodeKinds.RETURN
+    psi is KtThrowExpression -> KotlinNodeKinds.THROW
+    psi is KtTryExpression -> KotlinNodeKinds.TRY
+    psi is KtSuperExpression -> KotlinNodeKinds.SUPER_EXPRESSION
     psi is PsiErrorElement -> KotlinNodeKinds.ERROR
     else -> KotlinNodeKinds.OTHER
 }

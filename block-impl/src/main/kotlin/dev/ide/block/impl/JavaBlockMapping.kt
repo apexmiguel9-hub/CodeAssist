@@ -215,18 +215,29 @@ internal val STATEMENT_KINDS: Set<NodeKind> = setOf(
     "LabeledStatement", "EmptyStatement",
 ).map { NodeKind(it) }.toSet()
 
+/** Kotlin `kt.*` kinds that occupy a statement position. */
+internal val KOTLIN_STATEMENT_KINDS = setOf("kt.if", "kt.for", "kt.while", "kt.do_while", "kt.return", "kt.throw", "kt.try", "kt.when")
+
+/** Kotlin `kt.*` kinds that produce a value (expression positions). */
+internal val KOTLIN_EXPRESSION_KINDS = setOf("kt.lambda", "kt.binary", "kt.string_template", "kt.safe_access", "kt.qualified", "kt.constructor", "kt.super_expression")
+
 /** The slot category a child of [kind] satisfies — what may be placed where (placement validity). */
 internal fun categoryFor(kind: NodeKind): SlotCategory {
     val id = kind.id
     return when {
         kind == NodeKind.BLOCK || kind == NodeKind.LOCAL_VAR -> SlotCategory.STATEMENT
         kind in STATEMENT_KINDS || id.endsWith("Statement") -> SlotCategory.STATEMENT
+        // Kotlin statements (no neutral kind — an `if`/`for`/… is an expression in Kotlin).
+        id in KOTLIN_STATEMENT_KINDS -> SlotCategory.STATEMENT
         kind == NodeKind.TYPE_REF || id.endsWith("Type") -> SlotCategory.TYPE
         kind == NodeKind.PARAMETER -> SlotCategory.PARAMETER
         kind == NodeKind.METHOD_DECL || kind == NodeKind.FIELD_DECL || kind == NodeKind.CLASS_DECL -> SlotCategory.DECLARATION
         kind == NodeKind.IMPORT_DECL || kind == NodeKind.PACKAGE_DECL -> SlotCategory.DECLARATION
+        id == "kt.property" || id == "kt.class_body" || id == "kt.object" || id == "kt.typealias" -> SlotCategory.DECLARATION
         kind == NodeKind.METHOD_CALL || kind == NodeKind.MEMBER_ACCESS || kind == NodeKind.NAME_REF -> SlotCategory.EXPRESSION
         kind == NodeKind.LITERAL || id.endsWith("Expression") || id.endsWith("Literal") || id.endsWith("Access") -> SlotCategory.EXPRESSION
+        // Kotlin expressions (lambda, when, binary, string template, safe/qualified access, super).
+        id in KOTLIN_EXPRESSION_KINDS -> SlotCategory.EXPRESSION
         else -> SlotCategory.OPAQUE
     }
 }
@@ -258,6 +269,8 @@ internal fun valueKindFor(node: DomNode): ValueKind {
         id == "TextBlock" -> ValueKind.STRING
         isTypeNode(node) -> ValueKind.TYPE
         id == "InfixExpression" -> infixKind(node)
+        id == "kt.binary" -> kotlinBinaryKind(node)
+        id == "kt.string_template" -> ValueKind.STRING
         id == "PrefixExpression" -> when (node.text().firstOrNull()) {
             '!' -> ValueKind.BOOLEAN
             '-', '+', '~' -> ValueKind.NUMBER
@@ -297,8 +310,23 @@ private fun infixKind(node: DomNode): ValueKind {
     }
 }
 
+/** A Kotlin binary expression's kind, from the operator in the gap between its first two operands. */
+private fun kotlinBinaryKind(node: DomNode): ValueKind {
+    val kids = node.children
+    if (kids.size < 2) return ValueKind.UNKNOWN
+    val text = node.text()
+    val gapStart = (kids[0].range.end - node.range.start).coerceIn(0, text.length)
+    val gapEnd = (kids[1].range.start - node.range.start).coerceIn(gapStart, text.length)
+    return when (text.subSequence(gapStart, gapEnd).trim().toString()) {
+        "&&", "||", "<", ">", "<=", ">=", "==", "!=", "==", "===", "!==", "in", "!in", "is", "!is" -> ValueKind.BOOLEAN
+        "+" -> if (kids.any { valueKindFor(it) == ValueKind.STRING }) ValueKind.STRING else ValueKind.NUMBER
+        "-", "*", "/", "%" -> ValueKind.NUMBER
+        else -> ValueKind.UNKNOWN
+    }
+}
+
 /** Parent kinds whose (first) expression child is a condition — the slot expects a boolean. */
-private val CONDITION_PARENTS = setOf("IfStatement", "WhileStatement", "DoStatement", "AssertStatement")
+private val CONDITION_PARENTS = setOf("IfStatement", "WhileStatement", "DoStatement", "AssertStatement", "kt.if", "kt.while", "kt.do_while")
 
 /**
  * The [ValueKind] the POSITION of [child] under [parent] expects (an `if` condition expects BOOLEAN, an
@@ -387,6 +415,24 @@ internal fun labelFor(kind: NodeKind): String = when (kind) {
         "TryStatement" -> "try"
         "SwitchStatement" -> "switch"
         "ExpressionStatement" -> "" // transparent — just shows its inner call/assignment
+        // Kotlin kinds
+        "kt.if" -> "if"
+        "kt.for" -> "for"
+        "kt.while" -> "while"
+        "kt.do_while" -> "do"
+        "kt.return" -> "return"
+        "kt.throw" -> "throw"
+        "kt.try" -> "try"
+        "kt.when" -> "when"
+        "kt.class_body" -> "class"
+        "kt.property" -> "val"
+        "kt.lambda" -> "lambda"
+        "kt.binary" -> "expr"
+        "kt.string_template" -> "text"
+        "kt.safe_access", "kt.qualified" -> "access"
+        "kt.typealias" -> "alias"
+        "kt.constructor" -> "init"
+        "kt.super_expression" -> "super"
         else -> kind.id
     }
 }
