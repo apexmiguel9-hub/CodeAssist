@@ -279,6 +279,19 @@ internal class SettingsBackend(private val ctx: BackendContext) : SettingsServic
             )
         }
 
+        // Android-only: grant shared-storage access so projects live in /storage/emulated/0/CodeAssist/projects
+        // (openable/editable from ANY file manager or another IDE — e.g. CxxStudio for C++/.so work). Handled
+        // UI-side like BUILD_NOTIFICATIONS (needs the platform permission launcher), so no engine-side effect.
+        // While denied, projects stay in the app's own external folder. Restart the app after granting for the
+        // new location (and one-time project migration) to take effect. Desktop is NOT_APPLICABLE (no-op).
+        if (ctx.separateProcessBuildsSupported) {
+            out += UiSettingControl.Action(
+                BuiltInSettingsPages.ALL_FILES_ACCESS, "Shared storage projects",
+                "Store projects in /storage/emulated/0/CodeAssist (shared storage) so other apps — CxxStudio, any file manager — can open and edit them directly, no copying. Requires Android's \"All files access\"; tap to grant it. While denied, projects stay in the app's private folder. Restart CodeAssist after granting: existing projects are copied to the new location once.",
+                "Grant access", false, true, null,
+            )
+        }
+
         val modeDesc = when {
             mode == BuiltInSettingsPages.R8_MODE_INPROCESS ->
                 "R8 runs inside the IDE, capped at this app's memory limit (~$appHeapMb MB). Pick Forked VM to give R8 more by running it in a separate VM."

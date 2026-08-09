@@ -38,6 +38,12 @@ object BuiltInSettingsPages {
      *  launcher) — the SettingsScreen mirrors this key; there's no engine-side effect here. */
     const val BUILD_NOTIFICATIONS = "buildNotifications"
 
+    /** Action key on the [BUILD_RUNTIME] page (Android only): deep-link to the OS "All files access" screen
+     *  (Android 11+) / storage settings so the user can grant shared-storage access — the switch that moves
+     *  projects to `/storage/emulated/0/CodeAssist/projects` (see `AndroidIde.projectsDir`). Handled UI-side
+     *  (needs the platform permission launcher) — SettingsScreen mirrors this key. */
+    const val ALL_FILES_ACCESS = "accessAllFiles"
+
     /** IntSlider key on the [BUILD_RUNTIME] page: the heap (MB) the on-device R8 (release/minify) pass runs
      *  with in a forked VM — larger than the app's own heap cap. Read by `ForkedR8Shrinker` (:ide-android),
      *  which steps down + warns in the build log if the device can't grant it. Android-only effect. */

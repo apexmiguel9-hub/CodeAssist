@@ -82,6 +82,7 @@ import dev.ide.ui.generated.resources.support_ad_privacy
 import dev.ide.ui.generated.resources.support_ad_privacy_desc
 import dev.ide.ui.generated.resources.support_ad_privacy_button
 import dev.ide.ui.icons.CaIcons
+import dev.ide.ui.platform.rememberExternalStoragePermissionController
 import dev.ide.ui.platform.rememberNotificationPermissionController
 import dev.ide.ui.theme.Ca
 import dev.ide.ui.theme.Motion
@@ -97,6 +98,10 @@ private const val ACTION_BACKUP = "backup"
 /** Build Runtime page action: re-request the runtime notification permission (mirrors
  *  `BuiltInSettingsPages.BUILD_NOTIFICATIONS`). Needs the platform permission launcher, so it's handled here. */
 private const val ACTION_BUILD_NOTIFICATIONS = "buildNotifications"
+/** Build Runtime page action: grant shared-storage ("all files access") so projects live in
+ *  `/storage/emulated/0/CodeAssist` (openable by other apps/CxxStudio). Mirrors
+ *  `BuiltInSettingsPages.ALL_FILES_ACCESS`. Needs the platform permission launcher, so it's handled here. */
+private const val ACTION_ALL_FILES_ACCESS = "accessAllFiles"
 /** The ads on/off toggle is injected UI-side onto the Privacy page and routed to the [dev.ide.ui.ads.AdController]
  *  (persisted under its own `ads.enabled` pref), not the backend settings store — ads are a host concern the
  *  backend doesn't know about. [PRIVACY_PAGE_ID] mirrors `BuiltInSettingsPages.PRIVACY`. */
@@ -181,6 +186,7 @@ fun SettingsScreen(
     val notifEnabledMsg = stringResource(Res.string.build_notif_enabled)
     // The build-notification permission re-request (Build Runtime page); the launcher lives in composition.
     val notifController = rememberNotificationPermissionController()
+    val storageController = rememberExternalStoragePermissionController()
     LaunchedEffect(toast) { if (toast != null) { delay(2400); toast = null } }
 
     val onSet: (String, String, String) -> Unit = { pageId, key, encoded ->
@@ -205,6 +211,9 @@ fun SettingsScreen(
             ACTION_BUILD_NOTIFICATIONS -> notifController.request { granted ->
                 if (granted) toast = notifEnabledMsg else notifController.openSettings()
             }
+            // Grant shared-storage access (Android 11+ opens the OS "All files access" screen; no runtime
+            // dialog ever, so no launchable callback). The user re-opens the app after granting.
+            ACTION_ALL_FILES_ACCESS -> storageController.request()
             else -> scope.launch { backend.settings.invokeSettingAction(pageId, action.key)?.let { toast = it } }
         }
     }

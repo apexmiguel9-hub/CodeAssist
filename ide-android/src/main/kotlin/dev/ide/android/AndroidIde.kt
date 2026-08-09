@@ -1,6 +1,8 @@
 package dev.ide.android
 
 import android.content.Context
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Environment
 import androidx.core.app.NotificationManagerCompat
@@ -145,7 +147,7 @@ object AndroidIde {
         // directory ART permits executing binaries from.
         val nativeLibDir = Paths.get(context.applicationInfo.nativeLibraryDir)
 
-        val projectsRoot = File(home, "projects").toPath()
+        val projectsRoot = projectsDir(context).toPath()
         // android.jar MUST stay first: ProjectManager.onDevice treats bootClasspath.first() as the SDK
         // android.jar. The desugar stubs ride alongside it as the platform.
         val bootClasspath = listOf(androidJar.absolutePath, coreLambdaStubs.absolutePath)
@@ -273,7 +275,7 @@ object AndroidIde {
             r8Shrinker = r8Shrinker,
             r8MergeDexer = r8MergeDexer,
             mergeChunkProvider = dexMergeChunkProvider,
-        ).also { managerRef.set(it) }
+        ).also { managerRef.set(it) }.also { migrateProjectsToShared(it, File(home, "projects"), projectsRoot.toFile()) }
     }
 
     /**
@@ -390,8 +392,79 @@ object AndroidIde {
      *  the debug keystore, the kotlinc home, shared caches. This is the root surfaced to file managers. */
     fun appHomeDir(context: Context): File = File(externalHome(context), "codeassist")
 
-    /** The on-disk projects directory (`<external-files>/codeassist/projects`). */
-    fun projectsDir(context: Context): File = File(appHomeDir(context), "projects")
+    /**
+     * The on-disk projects directory. When the user has granted storage access to shared storage
+     * ("All files access" on Android 11+, or WRITE_EXTERNAL_STORAGE on Android 8/9), projects live in
+     * SHARED storage (`/<external>/CodeAssist/projects`) — browsable and editable by ANY file manager or
+     * another IDE (e.g. CxxStudio for C++/.so work), so the "compile the .so elsewhere → drop it into
+     * jniLibs" workflow needs no copying. Without that access it falls back to the app's own external dir
+     * (`<external-files>/codeassist/projects`, the pre-existing behaviour).
+     */
+    fun projectsDir(context: Context): File {
+        if (hasPublicStorageAccess(context)) {
+            val public = File(Environment.getExternalStorageDirectory(), "CodeAssist/projects")
+            if (public.isDirectory || public.mkdirs()) return public
+        }
+        return File(appHomeDir(context), "projects")
+    }
+
+    /**
+     * Whether this app instance may create/read files in shared storage (outside `Android/data/<pkg>/`).
+     *   - API 30+: the special "All files access" permission (`MANAGE_EXTERNAL_STORAGE`), checked live.
+     *   - API 26-28: the legacy `WRITE_EXTERNAL_STORAGE` runtime permission.
+     *   - API 29: scoped storage is enforced and all-files access doesn't exist yet, so shared root is
+     *     unreachable → falls back to app-specific storage.
+     */
+    fun hasPublicStorageAccess(context: Context): Boolean = when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
+            Environment.isExternalStorageManager()
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> false
+        else ->
+            context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                PackageManager.PERMISSION_GRANTED
+    }
+
+    /**
+     * One-time, non-destructive migration: after "All files access" is granted, copy projects created under
+     * the app-only location (`.../codeassist/projects`) into the new shared-storage root so they keep
+     * working there. Guarded by a preference (runs at most once ever); skips bulky derived trees
+     * (build/, .gradle/, .platform/caches/) exactly like ProjectManager.copyTree. Best-effort — never throws
+     * into bootstrap.
+     */
+    private fun migrateProjectsToShared(manager: ProjectManager, from: File, to: File) {
+        try {
+            if (manager.preference(MIGRATED_PREF) == "true") return
+            if (to == from || !from.isDirectory) {
+                manager.setPreference(MIGRATED_PREF, "true")
+                return
+            }
+            val dest = to
+            if (dest.isDirectory || dest.mkdirs()) {
+                val names = dest.listFiles()?.filter { it.isDirectory }?.map { it.name }.orEmpty().toSet()
+                from.listFiles()?.filter { it.isDirectory }?.forEach { src ->
+                    if (src.name !in names) runCatching { copyTreeFiltered(src, File(dest, src.name)) }
+                }
+            }
+            manager.setPreference(MIGRATED_PREF, "true")
+        } catch (_: Exception) { }
+    }
+
+    private fun copyTreeFiltered(src: File, dest: File) {
+        src.walkTopDown().forEach { path ->
+            val rel = src.toPath().relativize(path.toPath()).toString()
+            val segs = rel.split(File.separatorChar)
+            if (segs.any { it == "build" || it == ".gradle" } || rel.contains(".platform/caches/")) return@forEach
+            val target = File(dest, rel)
+            if (path.isDirectory) target.mkdirs()
+            else {
+                target.parentFile?.mkdirs()
+                if (target.exists()) return@forEach
+                path.copyTo(target)
+            }
+        }
+    }
+
+    private const val MIGRATED_PREF = "projects.shared.migrated"
 
     /** Measure (once per app version, in the background) the largest heap a forked VM grants R8 on this device
      *  and cache it in [BuiltInSettingsPages.R8_CEILING_PREF] (`0` = forking unavailable). The settings UI uses
