@@ -73,6 +73,7 @@ enum class EditorViewMode { Text, Blocks, Graph, Preview, Split }
 internal fun EditorViewMode.persistId(): String = when (this) {
     EditorViewMode.Text -> "text"
     EditorViewMode.Blocks -> "blocks"
+    EditorViewMode.Graph -> "graph"
     EditorViewMode.Preview -> "preview"
     EditorViewMode.Split -> "split"
 }
