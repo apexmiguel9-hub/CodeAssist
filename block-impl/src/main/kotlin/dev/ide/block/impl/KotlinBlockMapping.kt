@@ -31,8 +31,6 @@ object KotlinBlockMapping : BlockMapping {
 
     override val languages: Set<LanguageId> = setOf(LanguageId("kotlin"))
 
-    fun catFor(kind: NodeKind): SlotCategory = categoryFor(kind)
-
     override val handles: Set<NodeKind> = buildSet {
         // neutral kinds the Kotlin DOM reuses
         add(NodeKind.COMPILATION_UNIT); add(NodeKind.PACKAGE_DECL); add(NodeKind.IMPORT_DECL)
@@ -43,7 +41,6 @@ object KotlinBlockMapping : BlockMapping {
         // kotlin-specific kinds
         add(KotlinKinds.PROPERTY); add(KotlinKinds.OBJECT_DECL); add(KotlinKinds.LAMBDA)
         add(KotlinKinds.WHEN); add(KotlinKinds.STRING_TEMPLATE); add(KotlinKinds.BINARY)
-        add(KotlinKinds.SAFE_ACCESS); add(KotlinKinds.QUALIFIED); add(KotlinKinds.TYPEALIAS)
         add(KotlinKinds.CONSTRUCTOR)
         add(KotlinKinds.CLASS_BODY); add(KotlinKinds.IF); add(KotlinKinds.FOR)
         add(KotlinKinds.WHILE); add(KotlinKinds.DO_WHILE); add(KotlinKinds.RETURN)
@@ -76,7 +73,7 @@ object KotlinBlockMapping : BlockMapping {
         }
         val parts = ArrayList<BlockPart>()
         if (children.first().range.start > node.range.start) {
-            parts += BlockPart.Field(chromeField(ctx, TextRange(node.range.start, children.first().range.start)))
+            parts += BlockPart.Field(ctx.chromeField(TextRange(node.range.start, children.first().range.start)))
         }
         parts += BlockPart.Slot(
             ctx.slot(
@@ -87,7 +84,7 @@ object KotlinBlockMapping : BlockMapping {
             ),
         )
         if (node.range.end > children.last().range.end) {
-            parts += BlockPart.Field(chromeField(ctx, TextRange(children.last().range.end, node.range.end)))
+            parts += BlockPart.Field(ctx.chromeField(TextRange(children.last().range.end, node.range.end)))
         }
         return ctx.block(node, node.kind, parts, labelFor(node.kind))
     }
@@ -105,7 +102,7 @@ object KotlinBlockMapping : BlockMapping {
         val parts = ArrayList<BlockPart>()
         var pos = node.range.start
         for (c in children) {
-            if (c.range.start > pos) parts += BlockPart.Field(chromeField(ctx, TextRange(pos, c.range.start)))
+            if (c.range.start > pos) parts += BlockPart.Field(ctx.chromeField(TextRange(pos, c.range.start)))
             if (c === bodyChild) {
                 if (members.isNotEmpty()) {
                     parts += BlockPart.Slot(
@@ -125,7 +122,7 @@ object KotlinBlockMapping : BlockMapping {
                 pos = c.range.end
             }
         }
-        if (node.range.end > pos) parts += BlockPart.Field(chromeField(ctx, TextRange(pos, node.range.end)))
+        if (node.range.end > pos) parts += BlockPart.Field(ctx.chromeField(TextRange(pos, node.range.end)))
         return ctx.block(node, node.kind, parts, labelFor(node.kind))
     }
 }
