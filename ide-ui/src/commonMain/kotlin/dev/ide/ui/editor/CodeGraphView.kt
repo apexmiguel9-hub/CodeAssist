@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -38,18 +39,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
@@ -73,6 +77,7 @@ import com.ronjunevaldoz.graphyn.editor.canvas.components.PortCompatibility
 import com.ronjunevaldoz.graphyn.editor.design.GraphynDs
 import com.ronjunevaldoz.graphyn.editor.interaction.GraphynEditorIntent
 import com.ronjunevaldoz.graphyn.editor.state.GraphynEditorState
+import com.ronjunevaldoz.graphyn.editor.state.NodeGroup
 import com.ronjunevaldoz.graphyn.editor.state.rememberGraphynEditorState
 import com.ronjunevaldoz.graphyn.editor.state.fitToContent
 import com.ronjunevaldoz.graphyn.editor.state.updateCanvasSize
@@ -81,19 +86,30 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.TimeSource
 
 /**
- * Codex node-graph editor — Phase 3 (own gestures).
+ * Codex node-graph editor — Phase 4 (cajas / boxes).
  *
  * Graphyn's built-in gestures are desktop-first (mouse-wheel zoom, click-click connect, hover) and are
- * unusable on a phone, so we do NOT compose `GraphynCanvasSurface`. Instead we render the graph ourselves
- * from the public state API — [GraphynCanvasBackdrop] + [GraphynConnectionLayer] + real [FieldCardFactory]
- * cards with the viewport transform applied via `graphicsLayer` — with NO internal gesture handlers, and
- * put a single full-screen [GraphGestures] overlay on top that owns every interaction Godot-style (like the
- * resize of NodeXStudio): 1-finger pan on empty canvas, pinch-to-zoom on the two-finger midpoint, grab a
- * card body to move it, and drag out of an output port to wire (magnet + green/red rings). Consuming every
- * pointer event here also guarantees the cards' internal tap/drag gestures (which would fight our layer)
- * never fire.
+ * unusable on a phone, so we do NOT compose `GraphynCanvasSurface`. We render the graph ourselves from the
+ * public state API with NO internal gesture handlers, and put a single full-screen [GraphGestures] overlay
+ * on top that owns every interaction Godot-style (like the resize of NodeXStudio):
+ * 1-finger pan, pinch-zoom, grab a card, drag a wire out of an output port.
+ *
+ * Boxes ("cajas"): a group of nodes can be folded into a single square box with exactly ONE output cable,
+ * a name, a collapse chevron (top-left) and a pencil (top-right). Member cards are hidden on the main
+ * canvas — the box shows only its exposed value rows. Gestures on the frame/box:
+ *  - drag the box body        -> move the whole group (all members by the same delta)
+ *  - long-press the box body  -> context menu: Editar / Renombrar / Duplicar / Eliminar
+ *  - tap top-left chevron     -> collapse / expand the box (port stays visible)
+ *  - tap top-right pencil     -> open the mini group editor
+ *  - drag out of the box port -> wire from the designated inner output node
+ *
+ * Editar / pencil opens a MINI editor (smaller than the main viewport) scoped to the group's nodes, with
+ * pan / pinch / move / connect, a "+" to add nodes, a delete button and Save — everything runs on the SAME
+ * workflow, so closing Save recomputes the box and everything stays consistent.
  */
 @Composable
 fun CodeGraphView(modifier: Modifier = Modifier) {
@@ -113,33 +129,41 @@ fun CodeGraphView(modifier: Modifier = Modifier) {
     var selectMode by remember { mutableStateOf(false) }
     var renameFor by remember { mutableStateOf<String?>(null) }
     var renameText by remember { mutableStateOf("") }
+    var editingGroup by remember { mutableStateOf<NodeGroup?>(null) }
+    var groupMenuFor by remember { mutableStateOf<String?>(null) }
+    var collapsedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     Box(modifier) {
         // Canvas: renders nodes/connections ourselves, NO library gesture handlers.
-        GraphCanvas(state = state, nodeSpecs = specs, modifier = Modifier.fillMaxSize())
+        GraphCanvas(state = state, nodeSpecs = specs, collapsedIds = collapsedIds, modifier = Modifier.fillMaxSize())
 
-        // Gestures: pan / pinch-zoom / node-grab / connect. Consumes everything.
-        GraphGestures(state = state, nodeSpecs = specs, selectMode = selectMode, modifier = Modifier.fillMaxSize())
+        // Gestures: pan / pinch-zoom / node-grab / connect / box interactions. Consumes everything.
+        GraphGestures(
+            state = state,
+            nodeSpecs = specs,
+            selectMode = selectMode,
+            collapsedIds = collapsedIds,
+            onToggleCollapse = { id -> collapsedIds = if (id in collapsedIds) collapsedIds - id else collapsedIds + id },
+            onOpenEditor = { g -> editingGroup = g },
+            onGroupMenu = { id -> groupMenuFor = id },
+            modifier = Modifier.fillMaxSize(),
+        )
 
         ControlChip(
             selectMode = selectMode,
+            showCaja = selectMode && state.effectiveSelectedNodeIds.size >= 2,
             onToggleSelect = { selectMode = !selectMode },
-            onGroup = {
-                val before = state.groups.map { it.id }
-                if (state.effectiveSelectedNodeIds.size >= 2) state.dispatch(GraphynEditorIntent.CreateGroupFromSelection)
-                val created = state.groups.firstOrNull { it.id !in before }
-                if (created != null) { renameFor = created.id; renameText = created.label }
-            },
             onCaja = {
-                if (state.effectiveSelectedNodeIds.isNotEmpty()) {
-                    state.dispatch(GraphynEditorIntent.CollapseSelectionToSubgraph)
+                val before = state.groups.map { it.id }
+                state.dispatch(GraphynEditorIntent.CreateGroupFromSelection)
+                val created = state.groups.firstOrNull { it.id !in before }
+                if (created != null) {
+                    // Keep only ONE exiting wire (the box's single output); cut every edge entering the box.
+                    groupCullEdges(state, created)
+                    renameFor = created.id
+                    renameText = created.label
                 }
             },
-            onExpand = {
-                val sub = state.workflow?.nodes?.firstOrNull { it.type == "graphyn.subgraph" }
-                if (sub != null) state.dispatch(GraphynEditorIntent.ExpandSubgraph(sub.id))
-            },
-            onLayout = { state.dispatch(GraphynEditorIntent.AutoLayout) },
             onJson = { jsonText = state.workflow?.toJson().orEmpty(); showJson = true },
             onAdd = { menu = GraphMenu.Categories },
         )
@@ -177,6 +201,37 @@ fun CodeGraphView(modifier: Modifier = Modifier) {
                 onClose = { renameFor = null },
             )
         }
+
+        // ---- box context menu (long-press on a box) ----
+        state.groups.firstOrNull { it.id == groupMenuFor }?.let { g ->
+            GroupContextMenu(
+                group = g,
+                onEdit = { editingGroup = g; groupMenuFor = null },
+                onRename = { renameFor = g.id; renameText = g.label; groupMenuFor = null },
+                onDuplicate = { duplicateGroup(state, specs, g); groupMenuFor = null },
+                onDelete = { state.dispatch(GraphynEditorIntent.DeleteGroup(g.id)); groupMenuFor = null },
+                onClose = { groupMenuFor = null },
+            )
+        }
+
+        // ---- mini group editor ----
+        editingGroup?.let { g ->
+            val live = state.groups.firstOrNull { it.id == g.id } ?: g
+            MiniGroupEditor(
+                group = live,
+                state = state,
+                nodeSpecs = specs,
+                onSave = { name, added ->
+                    if (added.isNotEmpty()) {
+                        state.groups = state.groups.map { if (it.id == live.id) it.copy(nodeIds = it.nodeIds + added) else it }
+                    }
+                    if (name.isNotBlank()) state.dispatch(GraphynEditorIntent.RenameGroup(live.id, name))
+                    state.groups.firstOrNull { it.id == live.id }?.let { groupCullEdges(state, it) }
+                    editingGroup = null
+                },
+                onClose = { editingGroup = null },
+            )
+        }
     }
 }
 
@@ -186,7 +241,12 @@ fun CodeGraphView(modifier: Modifier = Modifier) {
  * library's canvas, scaled around top-left origin.
  */
 @Composable
-private fun GraphCanvas(state: GraphynEditorState, nodeSpecs: NodeSpecRegistry, modifier: Modifier = Modifier) {
+private fun GraphCanvas(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    collapsedIds: Set<String>,
+    modifier: Modifier = Modifier,
+) {
     var initialFit by remember { mutableStateOf(true) }
     Box(
         modifier
@@ -205,6 +265,12 @@ private fun GraphCanvas(state: GraphynEditorState, nodeSpecs: NodeSpecRegistry, 
 
         val workflow = state.workflow
         if (workflow != null && workflow.nodes.isNotEmpty()) {
+            val memberIds = state.groups.flatMap { it.nodeIds }.toSet()
+            // Edges drawn by the library connection layer: only those between two NON-member cards.
+            // Box-internal logic and the box's single exiting wire are drawn by our own layers instead.
+            val layered = workflow.copy(
+                connections = workflow.connections.filter { it.fromNodeId !in memberIds && it.toNodeId !in memberIds },
+            )
             Box(
                 Modifier
                     .fillMaxSize()
@@ -216,16 +282,17 @@ private fun GraphCanvas(state: GraphynEditorState, nodeSpecs: NodeSpecRegistry, 
                         scaleY = state.viewport.scale
                     },
             ) {
-                GraphGroupLayer(state)
+                GraphBoxLayer(state, workflow, nodeSpecs, collapsedIds)
                 GraphynConnectionLayer(
-                    workflow = workflow, state = state, nodeSpecs = nodeSpecs,
+                    workflow = layered, state = state, nodeSpecs = nodeSpecs,
                     canvasCards = null,
                     draft = state.connectionDraft, draftPointer = state.connectionDraftPosition,
                     modifier = Modifier.fillMaxSize(),
                     color = GraphynDs.colors.connectionLine.copy(alpha = 0.6f),
                 )
-                GraphCardLayer(state, workflow, nodeSpecs)
+                GraphCardLayer(state, workflow, nodeSpecs, hiddenIds = memberIds)
                 GraphPortDots(state, nodeSpecs)
+                GroupExitEdgesLayer(state, nodeSpecs, collapsedIds)
             }
         }
     }
@@ -274,39 +341,535 @@ private fun GraphBackdrop(state: GraphynEditorState, modifier: Modifier = Modifi
     }
 }
 
-/** Group frames behind their member cards — a re-implementation of the library's internal group layer. */
+// ------------------------------------------------------------------------------------
+// Boxes ("cajas") — visual frames that fold a selection into a single square with one output.
+// ------------------------------------------------------------------------------------
+
+/** Draws the box frames (bespoke, since member cards are hidden and the box replaces them). */
 @Composable
-private fun GraphGroupLayer(state: GraphynEditorState) {
+private fun GraphBoxLayer(
+    state: GraphynEditorState,
+    workflow: WorkflowDefinition,
+    nodeSpecs: NodeSpecRegistry,
+    collapsedIds: Set<String>,
+) {
+    val density = LocalDensity.current
     state.groups.forEachIndexed { index, group ->
-        val positions = group.nodeIds.mapNotNull { nodeId ->
-            val idx = state.workflow?.nodes?.indexOfFirst { it.id == nodeId }?.takeIf { it >= 0 } ?: return@mapNotNull null
-            state.nodePosition(nodeId, idx)
-        }
-        if (positions.isEmpty()) return@forEachIndexed
-        val nodeSize = IntSize(220, 180)
-        val minX = positions.minOf { it.x } - GroupPadding
-        val minY = positions.minOf { it.y } - GroupPadding
-        val maxX = positions.maxOf { it.x } + nodeSize.width + GroupPadding
-        val maxY = positions.maxOf { it.y } + nodeSize.height + GroupPadding
-        val fillColor = groupColors[index % groupColors.size]
-        val borderColor = groupBorderColors[index % groupBorderColors.size]
+        val collapsed = group.id in collapsedIds
+        val rect = groupWorldRect(state, nodeSpecs, group, collapsed, density) ?: return@forEachIndexed
+        val fc = groupColors[index % groupColors.size]
+        val bc = groupBorderColors[index % groupBorderColors.size]
+        val corner = CornerRadius(12f * density.density)
+        val strokeW = 2f * density.density
         Box(
             Modifier
-                .offset { IntOffset(minX, minY) }
-                .size((maxX - minX).dp, (maxY - minY).dp)
-                .drawBehind { drawRect(fillColor) },
-            contentAlignment = Alignment.TopStart,
+                .offset { IntOffset(rect.left.roundToInt(), rect.top.roundToInt()) }
+                .size((rect.width / density.density).dp, (rect.height / density.density).dp)
+                .drawBehind {
+                    drawRoundRect(color = fc, cornerRadius = corner)
+                    drawRoundRect(color = bc, style = Stroke(width = strokeW), cornerRadius = corner)
+                },
         ) {
             Text(
-                group.label,
-                modifier = Modifier.offset(x = 8.dp, y = 4.dp),
-                color = borderColor,
+                if (collapsed) "▶" else "▼",
+                Modifier.padding(start = 8.dp, top = 5.dp),
+                color = bc,
                 fontSize = 10.sp,
             )
+            Text(
+                group.label,
+                Modifier.padding(start = 28.dp, top = 6.dp).width(140.dp),
+                color = bc,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                "✎",
+                Modifier.align(Alignment.TopEnd).padding(top = 5.dp, end = 9.dp),
+                color = bc,
+                fontSize = 11.sp,
+            )
+            if (!collapsed) {
+                Column(Modifier.padding(start = 10.dp, top = 32.dp, end = 8.dp)) {
+                    workflow.nodes.filter { it.id in group.nodeIds }.take(6).forEach { node ->
+                        val spec = nodeSpecs.resolve(node.type)
+                        val label = spec?.label ?: node.type
+                        val vals = (node.config.takeIf { it.isNotEmpty() } ?: spec?.defaultValues)
+                        val txt = vals?.takeIf { it.isNotEmpty() }
+                            ?.let { label + ": " + it.values.joinToString(", ") }
+                            ?: label
+                        Text(
+                            txt,
+                            color = bc.copy(alpha = 0.85f),
+                            fontSize = 9.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
         }
     }
 }
 
+/** Draws each box's single exiting wire from its virtual port to the external input it feeds. */
+@Composable
+private fun GroupExitEdgesLayer(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    collapsedIds: Set<String>,
+) {
+    val density = LocalDensity.current
+    val wf = state.workflow ?: return
+    if (state.groups.isEmpty()) return
+    data class ExitEdge(val from: Offset, val to: Offset)
+    val edges = mutableListOf<ExitEdge>()
+    val allInputs = worldPorts(state, nodeSpecs, density).filter { it.isInput }
+    state.groups.forEach { g ->
+        val collapsed = g.id in collapsedIds
+        val outWorld = groupVirtualPort(state, nodeSpecs, g, collapsed, density) ?: return@forEach
+        wf.connections.forEach { c ->
+            if (c.fromNodeId in g.nodeIds && c.toNodeId !in g.nodeIds) {
+                val to = allInputs.firstOrNull { it.nodeId == c.toNodeId && it.portName == c.toPort }?.world ?: return@forEach
+                edges.add(ExitEdge(outWorld, to))
+            }
+        }
+    }
+    if (edges.isEmpty()) return
+    val color = GraphynDs.colors.connectionLine.copy(alpha = 0.6f)
+    val stroke = 2f * density.density
+    val r = 6f * density.density
+    Canvas(Modifier.fillMaxSize()) {
+        edges.forEach { e ->
+            val dx = ((e.to.x - e.from.x) / 2f).coerceAtLeast(60f * density.density)
+            val path = Path().apply {
+                moveTo(e.from.x, e.from.y)
+                cubicTo(e.from.x + dx, e.from.y, e.to.x - dx, e.to.y, e.to.x, e.to.y)
+            }
+            drawPath(path, color, style = Stroke(width = stroke))
+            drawCircle(SnapAmber, radius = r, center = e.from)
+            drawCircle(Color(0xFF171717), radius = r * 0.5f, center = e.from)
+        }
+    }
+}
+
+/** World-space bounds of a box. Expanded = union of member cards + padding; collapsed = compact header. */
+private fun groupWorldRect(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    group: NodeGroup,
+    collapsed: Boolean,
+    density: Density,
+): Rect? {
+    val wf = state.workflow ?: return null
+    val rects = group.nodeIds.mapNotNull { id ->
+        val idx = wf.nodes.indexOfFirst { it.id == id }.takeIf { it >= 0 } ?: return@mapNotNull null
+        nodeWorldRect(state, nodeSpecs, wf.nodes[idx], density)
+    }
+    if (rects.isEmpty()) return null
+    val d = density.density
+    val pad = 16f * d
+    val minX = rects.minOf { it.left } - pad
+    val minY = rects.minOf { it.top } - pad
+    val maxX = rects.maxOf { it.right } + pad
+    if (collapsed) {
+        val h = 36f * d
+        val w = 200f * d
+        return Rect(minX, minY, minX + w, minY + h)
+    }
+    val maxY = rects.maxOf { it.bottom } + pad
+    return Rect(minX, minY, maxX, maxY)
+}
+
+/** Single output port position of a box, at the right-center of its current bounds. */
+private fun groupVirtualPort(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    group: NodeGroup,
+    collapsed: Boolean,
+    density: Density,
+): Offset? {
+    val r = groupWorldRect(state, nodeSpecs, group, collapsed, density) ?: return null
+    return Offset(r.right, r.top + r.height / 2f)
+}
+
+/** The inner node that owns the box's single output (first member with an exiting wire, else last member). */
+private fun groupOutputNode(state: GraphynEditorState, group: NodeGroup): String? {
+    val wf = state.workflow ?: return null
+    val exit = wf.connections.firstOrNull { it.fromNodeId in group.nodeIds && it.toNodeId !in group.nodeIds }?.fromNodeId
+    if (exit != null) return exit
+    return wf.nodes.lastOrNull { it.id in group.nodeIds }?.id
+}
+
+/** Virtual output port of a box, wired to BeginConnection from the designated inner node. */
+private fun groupOutputPort(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    group: NodeGroup,
+    collapsed: Boolean,
+    density: Density,
+): WorldPort? {
+    val pos = groupVirtualPort(state, nodeSpecs, group, collapsed, density) ?: return null
+    val outNodeId = groupOutputNode(state, group) ?: return null
+    val spec = state.workflow?.nodes?.firstOrNull { it.id == outNodeId }?.let { nodeSpecs.resolve(it.type) }
+    val portName = state.workflow?.connections
+        ?.firstOrNull { it.fromNodeId == outNodeId && it.toNodeId !in group.nodeIds }?.fromPort
+        ?: spec?.outputs?.firstOrNull()?.name ?: "output"
+    return WorldPort(
+        nodeId = outNodeId,
+        portName = portName,
+        spec = spec?.outputs?.firstOrNull() ?: PortSpec(portName, WorkflowType.OpaqueType, required = false),
+        isInput = false,
+        world = pos,
+    )
+}
+
+/** Hit zone of a box for a world point: chevron / pencil / body. */
+private data class BoxHit(val groupId: String, val zone: BoxZone)
+private sealed interface BoxZone {
+    data object Chevron : BoxZone
+    data object Pencil : BoxZone
+    data object Body : BoxZone
+}
+
+private fun hitBox(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    group: NodeGroup,
+    collapsed: Boolean,
+    world: Offset,
+    density: Density,
+): BoxZone? {
+    val rect = groupWorldRect(state, nodeSpecs, group, collapsed, density) ?: return null
+    if (!rect.contains(world)) return null
+    val d = density.density
+    val headerH = 30f * d
+    val corner = 34f * d
+    if (Rect(rect.left, rect.top, rect.left + corner, rect.top + headerH).contains(world)) return BoxZone.Chevron
+    if (Rect(rect.right - corner, rect.top, rect.right, rect.top + headerH).contains(world)) return BoxZone.Pencil
+    return BoxZone.Body
+}
+
+/** Topmost box whose bounds contain the point (z-wise last drawn). */
+private fun hitBoxId(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    world: Offset,
+    collapsedIds: Set<String>,
+    density: Density,
+): BoxHit? {
+    for (g in state.groups.asReversed()) {
+        val zone = hitBox(state, nodeSpecs, g, g.id in collapsedIds, world, density) ?: continue
+        return BoxHit(g.id, zone)
+    }
+    return null
+}
+
+/**
+ * After grouping or saving, keep ONLY the box's designated single exiting wire (the box output) and cut
+ * every wire that enters the box (the box has no inputs). Internal wires are preserved.
+ */
+private fun groupCullEdges(state: GraphynEditorState, group: NodeGroup) {
+    val wf = state.workflow ?: return
+    val members = group.nodeIds
+    val target = wf.connections.firstOrNull { it.fromNodeId in members && it.toNodeId !in members }?.fromNodeId
+    wf.connections.forEach { c ->
+        val cull = when {
+            c.fromNodeId in members && c.toNodeId in members -> false
+            c.fromNodeId in members && c.toNodeId !in members -> c.fromNodeId != target
+            c.fromNodeId !in members && c.toNodeId in members -> true
+            else -> false
+        }
+        if (cull) {
+            state.selectedConnection = c
+            state.dispatch(GraphynEditorIntent.DeleteSelectedConnection)
+        }
+    }
+    state.selectedConnection = null
+}
+
+/** Deep-copies a box (members + their wiring) as a new group labeled "<name> 2", offset by 60px. */
+private fun duplicateGroup(state: GraphynEditorState, nodeSpecs: NodeSpecRegistry, group: NodeGroup) {
+    val wf = state.workflow ?: return
+    val members = wf.nodes.filter { it.id in group.nodeIds }
+    if (members.isEmpty()) return
+    val copies = mutableMapOf<String, String>() // origId -> newId
+    for (orig in members) {
+        state.dispatch(GraphynEditorIntent.AddNode(nodeSpecs.resolve(orig.type) ?: fallbackSpec(orig)))
+        val newId = state.workflow!!.nodes.last().id
+        val oIdx = wf.nodes.indexOf(orig)
+        val oPos = state.nodePosition(orig.id, oIdx)
+        val nPos = state.nodePosition(newId, state.workflow!!.nodes.lastIndex)
+        val delta = IntOffset(oPos.x - nPos.x + 60, oPos.y - nPos.y + 60)
+        state.dispatch(GraphynEditorIntent.MoveNode(newId, delta))
+        copies[orig.id] = newId
+    }
+    wf.connections.forEach { c ->
+        if (c.fromNodeId in copies.keys && c.toNodeId in copies.keys) {
+            state.dispatch(GraphynEditorIntent.BeginConnection(copies.getValue(c.fromNodeId), c.fromPort))
+            state.dispatch(GraphynEditorIntent.CompleteConnection(copies.getValue(c.toNodeId), c.toPort))
+        }
+    }
+    state.selectedNodeIds = copies.values.toSet()
+    state.selectedNodeId = copies.values.lastOrNull()
+    state.dispatch(GraphynEditorIntent.CreateGroupFromSelection)
+    val newGroup = state.groups.lastOrNull { it.id != group.id }
+    if (newGroup != null) {
+        state.dispatch(GraphynEditorIntent.RenameGroup(newGroup.id, "${group.label} 2"))
+        groupCullEdges(state, newGroup)
+    }
+}
+
+/** Context menu shown on long-press of a box. */
+@Composable
+private fun GroupContextMenu(
+    group: NodeGroup,
+    onEdit: () -> Unit,
+    onRename: () -> Unit,
+    onDuplicate: () -> Unit,
+    onDelete: () -> Unit,
+    onClose: () -> Unit,
+) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.35f))
+            .swallowTouches(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier
+                .width(280.dp)
+                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(16.dp))
+                .padding(10.dp),
+        ) {
+            Text(group.label, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, fontSize = 15.sp, modifier = Modifier.padding(bottom = 6.dp))
+            MenuRow(text = "✎ Editar") { onEdit() }
+            MenuRow(text = "⚲ Renombrar") { onRename() }
+            MenuRow(text = "⧉ Duplicar") { onDuplicate() }
+            MenuRow(text = "✕ Eliminar") { onDelete() }
+            MenuRow(text = "Cancelar") { onClose() }
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------
+// Mini group editor — a small re-scoped editor over the SAME workflow (only the box's members).
+// ------------------------------------------------------------------------------------
+
+@Composable
+private fun MiniGroupEditor(
+    group: NodeGroup,
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    onSave: (String, List<String>) -> Unit,
+    onClose: () -> Unit,
+) {
+    val members = group.nodeIds
+    var canvasSize by remember(group.id) { mutableStateOf(IntSize.Zero) }
+    var origin by remember(group.id) { mutableStateOf(Offset.Zero) }
+    var localOffset by remember(group.id) { mutableStateOf(Offset.Zero) }
+    var localScale by remember(group.id) { mutableStateOf(1f) }
+    var renameText by remember(group.id) { mutableStateOf(group.label) }
+    var addedIds by remember(group.id) { mutableStateOf<List<String>>(emptyList()) }
+    var miniMenu by remember { mutableStateOf<GraphMenu?>(null) }
+    var miniSearch by remember { mutableStateOf("") }
+    val density = LocalDensity.current
+
+    fun fit() {
+        val rect = groupWorldRect(state, nodeSpecs, group, collapsed = false, density = density) ?: return
+        if (canvasSize.width <= 0 || canvasSize.height <= 0) return
+        val pad = 40f
+        val cw = rect.width + pad * 2
+        val ch = rect.height + pad * 2
+        val s = minOf(canvasSize.width / cw, canvasSize.height / ch).coerceIn(0.2f, 1.6f)
+        origin = Offset(rect.left - pad, rect.top - pad)
+        localScale = s
+        localOffset = Offset(
+            canvasSize.width / 2f - (rect.center.x - origin.x) * s,
+            canvasSize.height / 2f - (rect.center.y - origin.y) * s,
+        )
+    }
+
+    fun applyTransform(pan: Offset, zoom: Float, focus: Offset) {
+        if (zoom != 1f) {
+            val ns = (localScale * zoom).coerceIn(0.15f, 2.5f)
+            val w = miniToWorld(focus, localOffset, localScale, origin)
+            localScale = ns
+            val t = Offset(focus.x - w.x * ns, focus.y - w.y * ns)
+            localOffset = Offset(t.x + origin.x * ns, t.y + origin.y * ns)
+        }
+        if (pan != Offset.Zero) localOffset = localOffset + pan
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.55f))
+            .swallowTouches(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth(0.94f)
+                .fillMaxHeight(0.86f)
+                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(16.dp))
+                .padding(10.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("▣", fontSize = 15.sp)
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.weight(1f).height(40.dp),
+                )
+                Button(
+                    onClick = {
+                        val selConn = state.selectedConnection
+                        if (selConn != null) {
+                            state.selectedConnection = null
+                            state.dispatch(GraphynEditorIntent.DeleteSelectedConnection)
+                        } else {
+                            state.dispatch(GraphynEditorIntent.DeleteSelectedNode)
+                        }
+                    },
+                    modifier = Modifier.height(38.dp),
+                ) { Text("Borrar", fontSize = 11.sp) }
+                Button(
+                    onClick = {
+                        miniMenu = GraphMenu.Categories
+                        miniSearch = ""
+                    },
+                    modifier = Modifier.height(38.dp),
+                ) { Text("+", fontSize = 13.sp) }
+                Button(
+                    onClick = { onSave(renameText.trim(), addedIds) },
+                    modifier = Modifier.height(38.dp),
+                ) { Text("Guardar", fontSize = 11.sp) }
+                Box(
+                    Modifier
+                        .clip(CircleShape)
+                        .background(Color(0xFF3A3A3A))
+                        .clickable(onClick = onClose)
+                        .padding(6.dp),
+                    contentAlignment = Alignment.Center,
+                ) { Text("✕", fontSize = 12.sp) }
+            }
+
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF141414))
+                    .onSizeChanged { size ->
+                        canvasSize = size
+                        if (size.width > 0) fit()
+                    },
+            ) {
+                if (canvasSize.width > 0 && localScale > 0f) {
+                    MiniGraphBody(
+                        state = state,
+                        nodeSpecs = nodeSpecs,
+                        members = members,
+                        origin = origin,
+                        localOffset = localOffset,
+                        localScale = localScale,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    MiniGestures(
+                        state = state,
+                        nodeSpecs = nodeSpecs,
+                        members = members,
+                        origin = origin,
+                        localOffset = localOffset,
+                        localScale = localScale,
+                        onViewport = ::applyTransform,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
+        }
+
+        when (val m = miniMenu) {
+            is GraphMenu.Categories -> CategoryMenu(
+                onPick = { miniMenu = GraphMenu.Nodes(it); miniSearch = "" },
+                onClose = { miniMenu = null },
+            )
+            is GraphMenu.Nodes -> NodeMenu(
+                category = m.category,
+                search = miniSearch,
+                onSearch = { miniSearch = it },
+                onClose = { miniMenu = null },
+                onPick = { spec ->
+                    state.dispatch(GraphynEditorIntent.AddNode(spec))
+                    val newId = state.workflow?.nodes?.lastOrNull()?.id
+                    if (newId != null) {
+                        val cur = state.nodePosition(newId, state.workflow!!.nodes.lastIndex)
+                        val target = miniToWorld(
+                            Offset(canvasSize.width / 2f, canvasSize.height / 2f),
+                            localOffset, localScale, origin,
+                        )
+                        val delta = IntOffset((target.x - cur.x).roundToInt(), (target.y - cur.y).roundToInt())
+                        state.dispatch(GraphynEditorIntent.MoveNode(newId, delta))
+                        addedIds = addedIds + newId
+                    }
+                    miniMenu = null
+                },
+            )
+            null -> {}
+        }
+    }
+}
+
+@Composable
+private fun MiniGraphBody(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    members: Set<String>,
+    origin: Offset,
+    localOffset: Offset,
+    localScale: Float,
+    modifier: Modifier,
+) {
+    Box(modifier) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    transformOrigin = TransformOrigin(0f, 0f)
+                    translationX = localOffset.x - origin.x * localScale
+                    translationY = localOffset.y - origin.y * localScale
+                    scaleX = localScale
+                    scaleY = localScale
+                },
+        ) {
+            val wf = state.workflow ?: return@Box
+            val scopedWf = wf.copy(
+                connections = wf.connections.filter { it.fromNodeId in members && it.toNodeId in members },
+            )
+            GraphynConnectionLayer(
+                workflow = scopedWf, state = state, nodeSpecs = nodeSpecs,
+                canvasCards = null,
+                draft = state.connectionDraft, draftPointer = state.connectionDraftPosition,
+                modifier = Modifier.fillMaxSize(),
+                color = GraphynDs.colors.connectionLine.copy(alpha = 0.6f),
+            )
+            GraphCardLayer(state, wf, nodeSpecs, visibleIds = members)
+            GraphPortDots(state, nodeSpecs, onlyIds = members)
+        }
+    }
+}
+
+/** Selects a group with Box Select as the source for a new box using the existing group toolbar. */
 private val groupColors = listOf(
     Color(0x336C63F7), Color(0x33F9A825), Color(0x334ADE80),
     Color(0x33F87171), Color(0x3338BDF8),
@@ -315,12 +878,23 @@ private val groupBorderColors = listOf(
     Color(0xFF6C63F7), Color(0xFFF9A825), Color(0xFF4ADE80),
     Color(0xFFF87171), Color(0xFF38BDF8),
 )
-private const val GroupPadding = 20
+
+// ------------------------------------------------------------------------------------
+// Canvas card rendering.
+// ------------------------------------------------------------------------------------
 
 /** Node cards rendered via the real [FieldCardFactory], positioned by the layout state. */
 @Composable
-private fun GraphCardLayer(state: GraphynEditorState, workflow: WorkflowDefinition, nodeSpecs: NodeSpecRegistry) {
+private fun GraphCardLayer(
+    state: GraphynEditorState,
+    workflow: WorkflowDefinition,
+    nodeSpecs: NodeSpecRegistry,
+    visibleIds: Set<String>? = null,
+    hiddenIds: Set<String> = emptySet(),
+) {
     workflow.nodes.forEachIndexed { index, node ->
+        if (node.id in hiddenIds) return@forEachIndexed
+        if (visibleIds != null && node.id !in visibleIds) return@forEachIndexed
         val spec = nodeSpecs.resolve(node.type) ?: fallbackSpec(node)
         val position = state.nodePosition(node.id, index)
         val factory = FieldCardFactory(inputRows = spec.inputs.size, outputRows = spec.outputs.size)
@@ -353,11 +927,11 @@ private fun fallbackSpec(node: NodeRef) = NodeSpec(
 
 /** Decorative port dots drawn where Graphyn would render them (world space, under the gesture overlay). */
 @Composable
-private fun GraphPortDots(state: GraphynEditorState, nodeSpecs: NodeSpecRegistry) {
+private fun GraphPortDots(state: GraphynEditorState, nodeSpecs: NodeSpecRegistry, onlyIds: Set<String>? = null) {
     val density = LocalDensity.current
     Canvas(Modifier.fillMaxSize()) {
         val r = 6f * density.density
-        for (wp in worldPorts(state, nodeSpecs, density)) {
+        for (wp in worldPorts(state, nodeSpecs, density, onlyIds)) {
             val color = if (wp.isInput) SnapGreen else SnapAmber
             drawCircle(color = color, radius = r, center = wp.world)
             drawCircle(color = Color(0xFF171717), radius = r * 0.5f, center = wp.world)
@@ -369,11 +943,9 @@ private fun GraphPortDots(state: GraphynEditorState, nodeSpecs: NodeSpecRegistry
 @Composable
 private fun ControlChip(
     selectMode: Boolean,
+    showCaja: Boolean,
     onToggleSelect: () -> Unit,
-    onGroup: () -> Unit,
     onCaja: () -> Unit,
-    onExpand: () -> Unit,
-    onLayout: () -> Unit,
     onJson: () -> Unit,
     onAdd: () -> Unit,
 ) {
@@ -391,10 +963,7 @@ private fun ControlChip(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Chip(text = "Box Select", active = selectMode, onClick = onToggleSelect)
-            Chip(text = "Grupo", active = false, onClick = onGroup)
-            Chip(text = "Caja", active = false, onClick = onCaja)
-            Chip(text = "Expandir", active = false, onClick = onExpand)
-            Chip(text = "Layout", active = false, onClick = onLayout)
+            if (showCaja) Chip(text = "Caja", active = true, onClick = onCaja)
             Chip(text = "JSON", active = false, onClick = onJson)
             Chip(text = "+", active = false, onClick = onAdd)
         }
@@ -562,7 +1131,9 @@ private fun Modifier.swallowTouches(): Modifier = pointerInput(Unit) {
 //                                 the nearest compatible input in the row hotzone is the magnet snap
 //                                 target; dropping on a snap connects, on another input connects to the
 //                                 nearest, on empty cancels and cuts that output's previous wire.
-//   • selectMode = Pan          -> drag on empty is marquee multi-select instead of pan.
+//   • selectMode = Box Select   -> drag on empty is marquee multi-select; tap toggles a node's membership
+//   • a box (caja): drag body = move whole group; long-press = context menu; chevron toggles collapse;
+//     pencil opens the mini editor; its single virtual port starts a wire from the inner output node.
 // Every event is consumed so Graphyn's card-internal tap/drag handlers never double-fire.
 // ------------------------------------------------------------------------------------
 
@@ -575,6 +1146,7 @@ private sealed interface DragMode {
     data object Pan : DragMode
     data object Marquee : DragMode
     data object Node : DragMode
+    data object Group : DragMode
 }
 
 private data class PinchState(val dStart: Float, val scaleStart: Float)
@@ -598,6 +1170,10 @@ private fun GraphGestures(
     state: GraphynEditorState,
     nodeSpecs: NodeSpecRegistry,
     selectMode: Boolean,
+    collapsedIds: Set<String>,
+    onToggleCollapse: (String) -> Unit,
+    onOpenEditor: (NodeGroup) -> Unit,
+    onGroupMenu: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var rings by remember { mutableStateOf<List<RingPort>>(emptyList()) }
@@ -615,7 +1191,7 @@ private fun GraphGestures(
     }
 
     Box(
-        modifier.pointerInput(state, nodeSpecs, selectMode) {
+        modifier.pointerInput(state, nodeSpecs, selectMode, collapsedIds) {
             awaitEachGesture {
                 val down = awaitFirstDown(requireUnconsumed = false)
                 if (down.changedToUp()) return@awaitEachGesture
@@ -628,8 +1204,8 @@ private fun GraphGestures(
                 val chipGuard = with(density) { 60.dp.toPx() }
                 if (downScreen.y <= chipGuard) return@awaitEachGesture
 
-                // ---- output port: start a connection drag ----
-                val out = hitOutputPort(state, nodeSpecs, downWorld, density)
+                // ---- output port (real card or a box's single virtual port): start a connection drag ----
+                val out = hitOutputPort(state, nodeSpecs, downWorld, density, collapsedIds)
                 if (out != null) {
                     state.dispatch(GraphynEditorIntent.BeginConnection(out.nodeId, out.portName))
                     var lastScreen = downScreen
@@ -682,6 +1258,77 @@ private fun GraphGestures(
                         }
                     }
                     return@awaitEachGesture
+                }
+
+                // ---- box interactions (chelron / pencil / long-press / drag-move) ----
+                val boxHit = hitBoxId(state, nodeSpecs, downWorld, collapsedIds, density)
+                if (boxHit != null) {
+                    when (boxHit.zone) {
+                        BoxZone.Chevron -> {
+                            onToggleCollapse(boxHit.groupId)
+                            return@awaitEachGesture
+                        }
+                        BoxZone.Pencil -> {
+                            val g = state.groups.firstOrNull { it.id == boxHit.groupId }
+                            if (g != null) onOpenEditor(g)
+                            return@awaitEachGesture
+                        }
+                        BoxZone.Body -> {
+                            val downMark = TimeSource.Monotonic.markNow()
+                            var lastScreen = downScreen
+                            var dragged = false
+                            var pinch: PinchState? = null
+                            while (true) {
+                                val ev = awaitPointerEvent()
+                                val pressed = ev.changes.filter { it.pressed }
+                                if (pressed.isEmpty() || pressed.none { it.id == down.id }) break
+                                if (pressed.size >= 2) {
+                                    val a = pressed[0].position
+                                    val b = pressed[1].position
+                                    val d = (a - b).getDistance().coerceAtLeast(1f)
+                                    if (pinch == null) pinch = PinchState(dStart = d, scaleStart = state.viewport.scale)
+                                    val nextScale = (pinch!!.scaleStart * d / pinch!!.dStart).coerceIn(0.05f, 5f)
+                                    val mid = Offset((a.x + b.x) / 2f, (a.y + b.y) / 2f)
+                                    val factor = nextScale / state.viewport.scale
+                                    if (factor != 1f) {
+                                        state.dispatch(GraphynEditorIntent.UpdateViewportTransform(Offset.Zero, factor, mid))
+                                    }
+                                    dragged = true
+                                    pressed.forEach { it.consume() }
+                                    continue
+                                }
+                                if (pinch != null) {
+                                    pinch = null
+                                    lastScreen = pressed.first { it.id == down.id }.position
+                                }
+                                val change = pressed.first { it.id == down.id }
+                                change.consume()
+                                val screen = change.position
+                                if (!dragged && (screen - downScreen).getDistance() > viewConfiguration.touchSlop) {
+                                    dragged = true
+                                }
+                                if (!dragged) {
+                                    if (downMark.elapsedNow() >= 500.milliseconds) {
+                                        onGroupMenu(boxHit.groupId)
+                                        return@awaitEachGesture
+                                    }
+                                    continue
+                                }
+                                val scale = state.viewport.scale
+                                val wd = IntOffset(
+                                    ((screen.x - lastScreen.x) / scale).roundToInt(),
+                                    ((screen.y - lastScreen.y) / scale).roundToInt(),
+                                )
+                                if (wd != IntOffset.Zero) {
+                                    state.groups.firstOrNull { it.id == boxHit.groupId }?.nodeIds?.forEach { id ->
+                                        state.dispatch(GraphynEditorIntent.MoveNode(id, wd))
+                                    }
+                                }
+                                lastScreen = screen
+                            }
+                            return@awaitEachGesture
+                        }
+                    }
                 }
 
                 // ---- card body grab / pan / marquee ----
@@ -758,6 +1405,7 @@ private fun GraphGestures(
                         }
                         DragMode.Pan -> state.dispatch(GraphynEditorIntent.UpdateViewportTransform(delta, 1f, screen))
                         DragMode.Marquee -> marqueeCurrent = screen
+                        DragMode.Group -> {}
                     }
                 }
 
@@ -777,6 +1425,7 @@ private fun GraphGestures(
                         state.selectedNodeIds = emptySet()
                     }
                     DragMode.Node -> {}
+                    DragMode.Group -> {}
                 }
             }
         },
@@ -839,10 +1488,17 @@ private fun nodeWorldRect(state: GraphynEditorState, nodeSpecs: NodeSpecRegistry
 }
 
 /** Topmost node whose rendered card contains the world point (z-wise last drawn = last in workflow order). */
-private fun hitNodeId(state: GraphynEditorState, nodeSpecs: NodeSpecRegistry, world: Offset, density: Density): String? {
+private fun hitNodeId(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    world: Offset,
+    density: Density,
+    onlyIds: Set<String>? = null,
+): String? {
     val wf = state.workflow ?: return null
     for (i in wf.nodes.indices.reversed()) {
         val node = wf.nodes[i]
+        if (onlyIds != null && node.id !in onlyIds) continue
         val r = nodeWorldRect(state, nodeSpecs, node, density) ?: continue
         if (r.contains(world)) return node.id
     }
@@ -859,6 +1515,13 @@ private fun worldToScreen(state: GraphynEditorState, w: Offset): Offset {
     return Offset(w.x * vp.scale + vp.offset.x, w.y * vp.scale + vp.offset.y)
 }
 
+/** Mini-editor transform helpers (independent of the global viewport). screen = world*scale + (offset - origin*scale). */
+private fun miniToWorld(p: Offset, localOffset: Offset, localScale: Float, origin: Offset): Offset =
+    Offset((p.x - localOffset.x) / localScale + origin.x, (p.y - localOffset.y) / localScale + origin.y)
+
+private fun miniWorldToScreen(w: Offset, localOffset: Offset, localScale: Float, origin: Offset): Offset =
+    Offset(w.x * localScale + localOffset.x - origin.x * localScale, w.y * localScale + localOffset.y - origin.y * localScale)
+
 private fun nodeOrigin(state: GraphynEditorState, node: NodeRef): Offset {
     val wf = state.workflow
     val idx = wf?.nodes?.indexOfFirst { it.id == node.id }?.takeIf { it >= 0 } ?: return Offset.Zero
@@ -867,11 +1530,17 @@ private fun nodeOrigin(state: GraphynEditorState, node: NodeRef): Offset {
 }
 
 /** All input/output ports in world space, positioned exactly where Graphyn renders their dots. */
-private fun worldPorts(state: GraphynEditorState, nodeSpecs: NodeSpecRegistry, density: Density): List<WorldPort> {
+private fun worldPorts(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    density: Density,
+    onlyIds: Set<String>? = null,
+): List<WorldPort> {
     val wf = state.workflow ?: return emptyList()
     val cardW = 240f * density.density
     return buildList {
         for (node in wf.nodes) {
+            if (onlyIds != null && node.id !in onlyIds) continue
             val spec = nodeSpecs.resolve(node.type) ?: continue
             val o = nodeOrigin(state, node)
             spec.inputs.forEachIndexed { i, p ->
@@ -895,15 +1564,32 @@ private fun portHotRect(wp: WorldPort, density: Density): Rect {
     return Rect(left, wp.world.y - row / 2f, left + inner + outer, wp.world.y + row / 2f)
 }
 
+private fun portDotHitRect(wp: WorldPort, density: Density): Rect {
+    val half = 22f * density.density
+    return Rect(wp.world.x - half, wp.world.y - half, wp.world.x + half, wp.world.y + half)
+}
+
 private fun hitOutputPort(
     state: GraphynEditorState,
     nodeSpecs: NodeSpecRegistry,
     world: Offset,
     density: Density,
-): WorldPort? =
-    worldPorts(state, nodeSpecs, density)
+    collapsedIds: Set<String> = emptySet(),
+    onlyIds: Set<String>? = null,
+): WorldPort? {
+    worldPorts(state, nodeSpecs, density, onlyIds)
         .asReversed()
         .firstOrNull { !it.isInput && portHotRect(it, density).contains(world) }
+        ?.let { return it }
+    // Boxes' single virtual output ports (main canvas only).
+    if (onlyIds == null) {
+        for (g in state.groups.asReversed()) {
+            val ov = groupOutputPort(state, nodeSpecs, g, g.id in collapsedIds, density)
+            if (ov != null && portDotHitRect(ov, density).contains(world)) return ov
+        }
+    }
+    return null
+}
 
 private fun inputRingPorts(
     state: GraphynEditorState,
@@ -911,13 +1597,15 @@ private fun inputRingPorts(
     srcPort: PortSpec,
     snap: WorldPort?,
     density: Density,
+    onlyIds: Set<String>? = null,
+    toScreen: ((Offset) -> Offset)? = null,
 ): List<RingPort> =
-    worldPorts(state, nodeSpecs, density)
+    worldPorts(state, nodeSpecs, density, onlyIds)
         .filter { it.isInput }
         .mapNotNull { wp ->
             val compatible = PortCompatibility.isCompatible(wp.spec, srcPort)
             RingPort(
-                screen = worldToScreen(state, wp.world),
+                screen = (toScreen ?: { w -> worldToScreen(state, w) })(wp.world),
                 compatible = compatible,
                 isSnap = snap != null && snap.nodeId == wp.nodeId && snap.portName == wp.portName,
             )
@@ -930,8 +1618,9 @@ private fun findSnapTarget(
     out: WorldPort,
     world: Offset,
     density: Density,
+    onlyIds: Set<String>? = null,
 ): WorldPort? =
-    worldPorts(state, nodeSpecs, density)
+    worldPorts(state, nodeSpecs, density, onlyIds)
         .filter { it.isInput && it.nodeId != out.nodeId && PortCompatibility.isCompatible(it.spec, out.spec) }
         .filter { portHotRect(it, density).contains(world) }
         .minByOrNull { (world - it.world).getDistance() }
@@ -942,10 +1631,164 @@ private fun nearestInputPort(
     nodeSpecs: NodeSpecRegistry,
     world: Offset,
     density: Density,
+    onlyIds: Set<String>? = null,
 ): WorldPort? =
-    worldPorts(state, nodeSpecs, density)
+    worldPorts(state, nodeSpecs, density, onlyIds)
         .filter { it.isInput && portHotRect(it, density).contains(world) }
         .minByOrNull { (world - it.world).getDistance() }
+/**
+ * Mini-editor gestures: same interactions as [GraphGestures] but scoped to the box's members and with its
+ * own local viewport transform (localOffset/localScale/origin), independent of the global viewport.
+ */
+@Composable
+private fun MiniGestures(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    members: Set<String>,
+    origin: Offset,
+    localOffset: Offset,
+    localScale: Float,
+    onViewport: (Offset, Float, Offset) -> Unit,
+    modifier: Modifier,
+) {
+    var rings by remember { mutableStateOf<List<RingPort>>(emptyList()) }
+    var dragOut by remember { mutableStateOf<Offset?>(null) }
+    val density = LocalDensity.current
+
+    fun m2w(p: Offset) = miniToWorld(p, localOffset, localScale, origin)
+    fun w2m(w: Offset) = miniWorldToScreen(w, localOffset, localScale, origin)
+
+    LaunchedEffect(state.connectionDraft) {
+        if (state.connectionDraft == null) {
+            rings = emptyList()
+            dragOut = null
+        }
+    }
+
+    Box(
+        modifier.pointerInput(state, nodeSpecs, localOffset, localScale, origin) {
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                if (down.changedToUp()) return@awaitEachGesture
+                down.consume()
+
+                val downScreen = down.position
+                val downWorld = m2w(downScreen)
+
+                val out = hitOutputPort(state, nodeSpecs, downWorld, density, onlyIds = members)
+                if (out != null) {
+                    state.dispatch(GraphynEditorIntent.BeginConnection(out.nodeId, out.portName))
+                    var lastScreen = downScreen
+                    var began = false
+                    var snapped: WorldPort? = null
+                    var exited = false
+                    dragOut = w2m(out.world)
+                    while (true) {
+                        val ev = awaitPointerEvent()
+                        val pressed = ev.changes.filter { it.pressed }
+                        if (pressed.isEmpty() || pressed.none { it.id == down.id }) break
+                        if (pressed.size >= 2) {
+                            state.dispatch(GraphynEditorIntent.CancelConnection)
+                            exited = true
+                            break
+                        }
+                        val c = pressed.first { it.id == down.id }
+                        c.consume()
+                        val screen = c.position
+                        if (!began && (screen - downScreen).getDistance() < DragSlopPx) continue
+                        began = true
+                        val world = m2w(screen)
+                        snapped = findSnapTarget(state, nodeSpecs, out, world, density, onlyIds = members)
+                        val target = snapped?.world ?: world
+                        state.dispatch(GraphynEditorIntent.UpdateConnectionDraftPosition(target))
+                        rings = inputRingPorts(state, nodeSpecs, out.spec, snapped, density, onlyIds = members, toScreen = { w2m(it) })
+                        dragOut = w2m(out.world)
+                        lastScreen = screen
+                    }
+                    rings = emptyList()
+                    dragOut = null
+                    if (exited || !began) return@awaitEachGesture
+                    if (snapped != null) {
+                        state.dispatch(GraphynEditorIntent.CompleteConnection(snapped!!.nodeId, snapped!!.portName))
+                    } else {
+                        val drop = m2w(lastScreen)
+                        val nearest = nearestInputPort(state, nodeSpecs, drop, density, onlyIds = members)
+                        if (nearest != null && nearest.nodeId != out.nodeId) {
+                            state.dispatch(GraphynEditorIntent.CompleteConnection(nearest.nodeId, nearest.portName))
+                        } else {
+                            state.dispatch(GraphynEditorIntent.CancelConnection)
+                        }
+                    }
+                    return@awaitEachGesture
+                }
+
+                val grabbed = hitNodeId(state, nodeSpecs, downWorld, density, onlyIds = members)
+                val isNode = grabbed != null
+                if (isNode && state.effectiveSelectedNodeIds.none { it == grabbed }) {
+                    state.dispatch(GraphynEditorIntent.SelectNode(grabbed!!))
+                }
+
+                var lastScreen = downScreen
+                var dragged = false
+                var pinch: PinchState? = null
+
+                while (true) {
+                    val ev = awaitPointerEvent()
+                    val pressed = ev.changes.filter { it.pressed }
+                    if (pressed.isEmpty() || pressed.none { it.id == down.id }) break
+
+                    if (pressed.size >= 2) {
+                        val a = pressed[0].position
+                        val b = pressed[1].position
+                        val d = (a - b).getDistance().coerceAtLeast(1f)
+                        if (pinch == null) pinch = PinchState(dStart = d, scaleStart = localScale)
+                        val nextScale = (pinch!!.scaleStart * d / pinch!!.dStart).coerceIn(0.15f, 2.5f)
+                        val mid = Offset((a.x + b.x) / 2f, (a.y + b.y) / 2f)
+                        onViewport(Offset.Zero, nextScale / localScale, mid)
+                        dragged = true
+                        pressed.forEach { it.consume() }
+                        continue
+                    }
+                    if (pinch != null) {
+                        pinch = null
+                        lastScreen = pressed.first { it.id == down.id }.position
+                    }
+
+                    val change = pressed.first { it.id == down.id }
+                    change.consume()
+                    val screen = change.position
+                    val delta = screen - lastScreen
+                    lastScreen = screen
+
+                    if (!dragged && (screen - downScreen).getDistance() > viewConfiguration.touchSlop) dragged = true
+                    if (!dragged) continue
+
+                    if (isNode) {
+                        val wd = IntOffset((delta.x / localScale).roundToInt(), (delta.y / localScale).roundToInt())
+                        if (wd != IntOffset.Zero) state.dispatch(GraphynEditorIntent.MoveNode(grabbed!!, wd))
+                    } else {
+                        onViewport(delta, 1f, screen)
+                    }
+                }
+            }
+        },
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            val ripple = 23f * localScale
+            dragOut?.let { drawCircle(Color.White, radius = ripple * 0.8f, center = it) }
+            rings.forEach { rp ->
+                val color = if (rp.compatible) SnapGreen else SnapRed
+                if (rp.isSnap) {
+                    drawCircle(color.copy(alpha = 0.9f), radius = ripple + 3f, center = rp.screen)
+                    drawCircle(Color.White, radius = ripple - 5f, center = rp.screen)
+                } else {
+                    drawCircle(color.copy(alpha = 0.85f), radius = ripple, center = rp.screen)
+                    drawCircle(color, radius = ripple, center = rp.screen, style = Stroke(width = 3f))
+                }
+            }
+        }
+    }
+}
 
 /** A catalog category with its node specs. */
 data class GraphCategory(
