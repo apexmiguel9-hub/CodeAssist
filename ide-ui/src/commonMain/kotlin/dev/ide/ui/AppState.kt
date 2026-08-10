@@ -67,7 +67,7 @@ object LeftPanelId {
 /** Editor surface for a tab: the plain text editor, the projectional block editor over the same AST, a
  *  full-pane preview, or [Split] — code and its preview together (so you can edit and watch it update,
  *  the one layout that works on a phone where the panes can't otherwise share the screen). */
-enum class EditorViewMode { Text, Blocks, Preview, Split }
+enum class EditorViewMode { Text, Blocks, Graph, Preview, Split }
 
 /** Stable persisted id for a tab's [EditorViewMode] (see `UiOpenTab.viewMode`). */
 internal fun EditorViewMode.persistId(): String = when (this) {

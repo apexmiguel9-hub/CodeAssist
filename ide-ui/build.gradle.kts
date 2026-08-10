@@ -44,6 +44,10 @@ kotlin {
             implementation(compose.preview) // the @Preview annotation (BlockEditor.kt previews)
             implementation(compose.components.resources) // bundled fonts (JetBrains Mono) via composeResources/
             implementation(libs.kotlinx.coroutines.core)
+            // Graphyn spike (node graph editor, see CodeGraphView.kt): editor shell + core model + JSON
+            // serialization. Single source of truth for the graph = WorkflowDefinition<->JSON (kotlinx).
+            implementation("io.github.ronjunevaldoz:graphyn-editor:0.9.2")
+            implementation("io.github.ronjunevaldoz:graphyn-core-serialization:0.9.2")
         }
 
         // An intermediate JVM-only source set shared by the desktop + android targets, so it can depend on

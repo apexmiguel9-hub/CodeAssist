@@ -131,6 +131,8 @@ private fun ViewModeToggle(
                 )
             }
         }
+        // Graph spike: node graph editor (Graphyn) — always available for now (opt-in via the toggle).
+        SegmentItem(CaIcons.gitBranch, "Grafo", mode == EditorViewMode.Graph) { onSelect(EditorViewMode.Graph) }
         if (canPreview) {
             SegmentItem(CaIcons.image, stringResource(Res.string.breadcrumb_preview), mode == EditorViewMode.Preview) {
                 onSelect(
