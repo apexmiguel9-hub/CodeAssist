@@ -37,10 +37,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.changedToUp
-import androidx.compose.ui.input.pointer.consume
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -363,8 +363,10 @@ private fun MarqueeSelectOverlay(state: GraphynEditorState) {
             val c = current
             if (s != null && c != null) {
                 val rect = Rect(minOf(s.x, c.x), minOf(s.y, c.y), maxOf(s.x, c.x), maxOf(s.y, c.y))
-                drawRect(Color(0x3333B5E5), rect, style = Stroke(width = 2f))
-                drawRect(Color(0x2233B5E5), rect)
+                val topLeft = Offset(rect.left, rect.top)
+                val size = Size(rect.width, rect.height)
+                drawRect(Color(0x3333B5E5), topLeft = topLeft, size = size, style = Stroke(width = 2f))
+                drawRect(Color(0x2233B5E5), topLeft = topLeft, size = size)
             }
         }
     }
