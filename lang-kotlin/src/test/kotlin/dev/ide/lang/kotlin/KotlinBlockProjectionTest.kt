@@ -61,12 +61,11 @@ class KotlinBlockProjectionTest {
             }
         """.trimIndent()
         val blocks = blocksOf(src)
-        val cls = blocks.firstOrNull { it.label == "class" }
+        val cls = blocks.firstOrNull { it.kind.id == "class_decl" }
         assertTrue(cls != null, "class block present: ${blocks.map { it.label }}")
-        val body = blocks.firstOrNull { it.kind.id == "kt.class_body" }
-        assertTrue(body != null, "class body container present: ${blocks.map { it.kind.id }}")
-        val memberSlot = body?.slots?.singleOrNull { it.multiple }
-        assertTrue(memberSlot != null, "class body is one multiple declaration slot")
+        val memberSlot = cls?.slots?.singleOrNull { it.multiple }
+        assertTrue(memberSlot != null, "class has one multiple member slot")
+        assertTrue(blocks.any { it.label == "method" }, "greet decomposes: ${blocks.map { it.label }}")
     }
 
     @Test
