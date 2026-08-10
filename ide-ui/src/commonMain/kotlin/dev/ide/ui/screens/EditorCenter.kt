@@ -309,7 +309,7 @@ internal fun EditorCenter(
                         modifier = Modifier.weight(1f).fillMaxWidth(),
                     ) else codeSurface(Modifier.weight(1f).fillMaxWidth())
 
-                    EditorViewMode.Graph -> CodeGraphView(Modifier.weight(1f).fillMaxWidth())
+                    EditorViewMode.Graph -> CodeGraphView(Modifier.weight(1f).fillMaxWidth(), fileKey = active.path)
                     EditorViewMode.Preview -> previewSurface(Modifier.weight(1f).fillMaxWidth(), false)
                     // Edit + watch at once: stacked on a phone (the only way both fit), side-by-side when wide.
                     EditorViewMode.Split -> SplitEditorPreview(

@@ -35,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import dev.ide.ui.EditorViewMode
 import dev.ide.ui.IdeUiState
 import dev.ide.ui.LeftPanelId
 import dev.ide.ui.actions.dispatchAction
@@ -273,6 +274,8 @@ internal fun ExpandedLayout(
     fileActions: FileActions,
 ) {
     val project = state.backend.project
+    // The node editor is immersive: hide the tool panes while it's open so the graph gets the full centre column.
+    val graphMode = state.active?.viewMode == EditorViewMode.Graph
     val leftPanels = buildLeftPanels(
         state, fileActions, indexStatus.building,
         onNewFile, onNewFolder, onNewResource, onNewSource, onFileOp, onOpenDependencies, onOpenModuleConfig,
@@ -314,11 +317,11 @@ internal fun ExpandedLayout(
                 val consoleH = consoleHeight.coerceIn(minConsole, maxConsole)
                 Column(Modifier.fillMaxSize()) {
                     Row(Modifier.weight(1f).fillMaxWidth()) {
-                        SidebarPane(leftPanels, state.selectedLeftPanel, RailSide.Left, paneWidth = LeftPaneWidth)
+                        if (!graphMode) SidebarPane(leftPanels, state.selectedLeftPanel, RailSide.Left, paneWidth = LeftPaneWidth)
                         EditorCenter(state, indexStatus, compact = false, Modifier.weight(1f).fillMaxHeight())
                         // Right-edge tool-window pane. Fully plugin-derived: nothing lays down when no plugin
                         // contributes a RIGHT tool window (the AI chat is one such plugin).
-                        SidebarPane(rightPanels, state.selectedRightPanel, RailSide.Right, paneWidth = RightPaneWidth)
+                        if (!graphMode) SidebarPane(rightPanels, state.selectedRightPanel, RailSide.Right, paneWidth = RightPaneWidth)
                     }
                     if (state.consoleOpen) {
                         // Resize grip: a thin 1dp splitter line with a slightly taller invisible grab strip and a

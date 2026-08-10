@@ -83,7 +83,11 @@ internal fun BreadcrumbBar(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         // Tapping the location line opens the Structure panel in the left sidebar (IntelliJ-style outline).
-        Box(Modifier.weight(1f).clickable { state.selectLeftPanel(LeftPanelId.STRUCTURE) }) { Breadcrumb(crumbs) }
+        // In the node editor the crumb path is redundant chrome — hide it (the view-mode switch stays).
+        val isGraph = active.viewMode == EditorViewMode.Graph
+        if (!isGraph) {
+            Box(Modifier.weight(1f).clickable { state.selectLeftPanel(LeftPanelId.STRUCTURE) }) { Breadcrumb(crumbs) }
+        }
         ViewModeToggle(active.viewMode, canPreview, state.blocksEnabled) { active.viewMode = it }
     }
 }

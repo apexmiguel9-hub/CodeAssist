@@ -77,10 +77,11 @@ import com.ronjunevaldoz.graphyn.editor.canvas.components.PortCompatibility
 import com.ronjunevaldoz.graphyn.editor.design.GraphynDs
 import com.ronjunevaldoz.graphyn.editor.interaction.GraphynEditorIntent
 import com.ronjunevaldoz.graphyn.editor.state.GraphynEditorState
+import com.ronjunevaldoz.graphyn.editor.state.GraphynViewport
 import com.ronjunevaldoz.graphyn.editor.state.NodeGroup
 import com.ronjunevaldoz.graphyn.editor.state.rememberGraphynEditorState
-import com.ronjunevaldoz.graphyn.editor.state.fitToContent
 import com.ronjunevaldoz.graphyn.editor.state.updateCanvasSize
+import kotlin.math.absoluteValue
 import com.ronjunevaldoz.graphyn.ui.cards.FieldCardFactory
 import kotlin.math.floor
 import kotlin.math.max
@@ -90,11 +91,12 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.TimeSource
 
 /**
- * The editor state is hoisted here so rotating the phone (activity/`onCreate` recreation) does NOT reset the
- * workflow: the demo default would come back, the boxes would vanish and the viewport would jump to a corner.
- * Once created, the same [GraphynEditorState] (and its grouped nodes/groups/viewport) survives re-composition.
+ * Editor state per open file, keyed by path. A rotation (activity/`onCreate` recreation) reuses the SAME entry,
+ * so the workflow survives when the phone turns; opening a DIFFERENT file (or a brand-new file) gets a fresh
+ * editor, so a new file never inherits another file's nodes / boxes. Once created, the same
+ * [GraphynEditorState] (and its grouped nodes/groups/viewport) survives re-composition.
  */
-private var cachedGraphState: GraphynEditorState? = null
+private val graphStateCache = HashMap<String, GraphynEditorState>()
 
 /**
  * Codex node-graph editor — Phase 4 (cajas / boxes).
@@ -119,15 +121,24 @@ private var cachedGraphState: GraphynEditorState? = null
  * workflow, so closing Save recomputes the box and everything stays consistent.
  */
 @Composable
-fun CodeGraphView(modifier: Modifier = Modifier) {
-    val specs = remember { demoNodeSpecRegistry() }
-    val state = cachedGraphState ?: rememberGraphynEditorState(
-        initialWorkflow = demoWorkflow(),
-        nodeSpecs = specs,
-        // Effectively unlimited world: node placement clamps to [0, 60000] and panning is bound
-        // by this rect, so there is always room to keep placing nodes ("se queda corto el viewport").
-        canvasBounds = GraphynCanvasBounds(width = 60000, height = 60000),
-    ).also { cachedGraphState = it }
+fun CodeGraphView(
+    modifier: Modifier = Modifier,
+    fileKey: String? = null,
+) {
+    val specs = remember(fileKey) { demoNodeSpecRegistry() }
+    // Per-file cached state: rotation reuses the entry (workflow survives), a new/different file gets its own.
+    // `if` is inline so calling the @Composable factory inside the branch is legal.
+    val state = if (fileKey != null && graphStateCache.containsKey(fileKey)) {
+        graphStateCache.getValue(fileKey)
+    } else {
+        rememberGraphynEditorState(
+            initialWorkflow = demoWorkflow(),
+            nodeSpecs = specs,
+            // Effectively unlimited world: node placement clamps to [0, 60000] and panning is bound
+            // by this rect, so there is always room to keep placing nodes ("se queda corto el viewport").
+            canvasBounds = GraphynCanvasBounds(width = 60000, height = 60000),
+        ).also { created -> if (fileKey != null) graphStateCache[fileKey] = created }
+    }
 
     var menu by remember { mutableStateOf<GraphMenu?>(null) }
     var search by remember { mutableStateOf("") }
@@ -255,16 +266,17 @@ private fun GraphCanvas(
     modifier: Modifier = Modifier,
 ) {
     var initialFit by remember { mutableStateOf(true) }
+    val density = LocalDensity.current
     Box(
         modifier
             .background(GraphynDs.colors.canvasBackground)
             .onSizeChanged {
                 state.updateCanvasSize(it)
-                // First real size -> fit the whole graph once so the demo chain is visible on open;
-                // afterwards the user's pans/zooms take over (AutoLayout also calls fitToContent).
+                // First real size -> fit the whole visible content once so the demo chain is visible on open;
+                // afterwards the user's pans/zooms take over.
                 if (initialFit && it.width > 0 && it.height > 0) {
                     initialFit = false
-                    state.fitToContent()
+                    fitToVisibleContent(state, nodeSpecs, density, it)
                 }
             },
     ) {
@@ -290,13 +302,20 @@ private fun GraphCanvas(
                     },
             ) {
                 GraphBoxLayer(state, workflow, nodeSpecs, collapsedIds)
+                // A cable being dragged out of one of our boxes starts from the box's INNER node port, which is
+                // hidden inside the frame. Suppress the library draft and draw our own from the box's virtual
+                // output port so the wire visually leaves the box (not "from the bottom"/the inner node).
+                val draftFrom = state.connectionDraft?.fromNodeId
+                val boxDraftActive = draftFrom != null && state.groups.any { draftFrom in it.nodeIds }
                 GraphynConnectionLayer(
                     workflow = layered, state = state, nodeSpecs = nodeSpecs,
                     canvasCards = null,
-                    draft = state.connectionDraft, draftPointer = state.connectionDraftPosition,
+                    draft = if (boxDraftActive) null else state.connectionDraft,
+                    draftPointer = state.connectionDraftPosition,
                     modifier = Modifier.fillMaxSize(),
                     color = GraphynDs.colors.connectionLine.copy(alpha = 0.6f),
                 )
+                if (boxDraftActive) BoxOutputDraftLayer(state, nodeSpecs, collapsedIds, density, Modifier.fillMaxSize())
                 GraphCardLayer(state, workflow, nodeSpecs, hiddenIds = memberIds)
                 GraphPortDots(state, nodeSpecs, hiddenIds = memberIds)
                 GroupExitEdgesLayer(state, nodeSpecs, collapsedIds)
@@ -394,12 +413,6 @@ private fun GraphBoxLayer(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text(
-                "✎",
-                Modifier.align(Alignment.TopEnd).padding(top = 5.dp, end = 9.dp),
-                color = bc,
-                fontSize = 11.sp,
-            )
             slots.forEach { slot ->
                 Box(Modifier.offset { IntOffset(slot.x.roundToInt(), slot.y.roundToInt()) }) {
                     Box(
@@ -465,6 +478,36 @@ private fun GroupExitEdgesLayer(
             drawCircle(Color(0xFF171717), radius = r * 0.45f, center = o.pos)
             drawCircle(SnapAmber, radius = r, center = o.pos, style = Stroke(width = 2f * density.density))
         }
+    }
+}
+
+/**
+ * Draft wire while dragging OUT of a box: drawn from the box's virtual output port to the pointer, because
+ * the library's own draft starts from the inner (hidden) node port inside the frame.
+ */
+@Composable
+private fun BoxOutputDraftLayer(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    collapsedIds: Set<String>,
+    density: Density,
+    modifier: Modifier = Modifier,
+) {
+    val draft = state.connectionDraft
+    if (draft == null) return
+    val group = state.groups.firstOrNull { draft.fromNodeId in it.nodeIds } ?: return
+    val start = groupVirtualPort(state, nodeSpecs, group, group.id in collapsedIds, density) ?: return
+    val end = state.connectionDraftPosition ?: Offset(start.x + 120f, start.y)
+    val stroke = 3f * density.density
+    Canvas(modifier) {
+        val distance = (end.x - start.x).absoluteValue.coerceAtLeast(120f)
+        val direction = if (end.x >= start.x) 1f else -1f
+        val control = distance * 0.35f
+        val path = Path().apply {
+            moveTo(start.x, start.y)
+            cubicTo(start.x + control * direction, start.y, end.x - control * direction, end.y, end.x, end.y)
+        }
+        drawPath(path, GraphynDs.colors.connectionLine.copy(alpha = 0.35f), style = Stroke(width = stroke))
     }
 }
 
@@ -563,6 +606,56 @@ private fun groupWorldRect(
     return Rect(minX, minY, minX + boxW, minY + boxH)
 }
 
+/**
+ * Fits all visible content (non-member cards + boxes) centered WITHOUT Graphyn's world clamp. The library's
+ * `fitToContent` constrains the offset to the world rect [0,60000], so with content near the origin the
+ * offset is pinned to 0 and the fit lands top-left (fixes "fit no centrado" and the "pan bloqueado"/"zoom
+ * siempre en un sitio" symptoms). Because we then zoomAt/panBy the raw viewport the clamp never re-applies.
+ */
+private fun fitToVisibleContent(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    density: Density,
+    canvasSize: IntSize,
+) {
+    if (canvasSize.width <= 0 || canvasSize.height <= 0) return
+    val wf = state.workflow
+    if (wf == null || wf.nodes.isEmpty()) {
+        state.viewport = GraphynViewport(Offset.Zero, 1f)
+        return
+    }
+    val memberIds = state.groups.flatMap { it.nodeIds }.toSet()
+    val rects = mutableListOf<Rect>()
+    wf.nodes.forEach { node ->
+        if (node.id in memberIds) return@forEach
+        nodeWorldRect(state, nodeSpecs, node, density)?.let { rects += it }
+    }
+    state.groups.forEach { g ->
+        groupWorldRect(state, nodeSpecs, g, g.collapsed, density)?.let { rects += it }
+    }
+    if (rects.isEmpty()) {
+        state.viewport = GraphynViewport(Offset.Zero, 1f)
+        return
+    }
+    val bounds = Rect(
+        rects.minOf { it.left },
+        rects.minOf { it.top },
+        rects.maxOf { it.right },
+        rects.maxOf { it.bottom },
+    )
+    val d = density.density
+    val pad = 24f * d
+    if (bounds.width <= 0f || bounds.height <= 0f) return
+    val scale = minOf(
+        1f,
+        (canvasSize.width - pad * 2f) / bounds.width,
+        (canvasSize.height - pad * 2f) / bounds.height,
+    ).coerceIn(0.05f, 1f)
+    val center = Offset((bounds.left + bounds.right) / 2f, (bounds.top + bounds.bottom) / 2f)
+    val centerScreen = Offset(canvasSize.width / 2f, canvasSize.height / 2f)
+    state.viewport = GraphynViewport(centerScreen - center * scale, scale)
+}
+
 /** Single output port position of a box, at the right-center of its current bounds. */
 private fun groupVirtualPort(
     state: GraphynEditorState,
@@ -610,7 +703,6 @@ private fun groupOutputPort(
 private data class BoxHit(val groupId: String, val zone: BoxZone)
 private sealed interface BoxZone {
     data object Chevron : BoxZone
-    data object Pencil : BoxZone
     data object Body : BoxZone
 }
 
@@ -628,7 +720,6 @@ private fun hitBox(
     val headerH = 30f * d
     val corner = 34f * d
     if (Rect(rect.left, rect.top, rect.left + corner, rect.top + headerH).contains(world)) return BoxZone.Chevron
-    if (Rect(rect.right - corner, rect.top, rect.right, rect.top + headerH).contains(world)) return BoxZone.Pencil
     return BoxZone.Body
 }
 
@@ -965,13 +1056,11 @@ private fun MiniGraphBody(
 }
 
 /** Selects a group with Box Select as the source for a new box using the existing group toolbar. */
-private val groupColors = listOf(
-    Color(0x336C63F7), Color(0x33F9A825), Color(0x334ADE80),
-    Color(0x33F87171), Color(0x3338BDF8),
-)
+/** Neutral gray box styling (was a loud multi-color / Windows-7-blue theme). Fill is the app's panel dark. */
+private val groupColors = List(5) { Color(0xFF2A2A2A) }
 private val groupBorderColors = listOf(
-    Color(0xFF6C63F7), Color(0xFFF9A825), Color(0xFF4ADE80),
-    Color(0xFFF87171), Color(0xFF38BDF8),
+    Color(0xFF3A3A3A), Color(0xFF4A4A4A), Color(0xFF5A5A5A),
+    Color(0xFF4A4A4A), Color(0xFF3A3A3A),
 )
 
 // ------------------------------------------------------------------------------------
@@ -1379,11 +1468,6 @@ private fun GraphGestures(
                             onToggleCollapse(boxHit.groupId)
                             return@awaitEachGesture
                         }
-                        BoxZone.Pencil -> {
-                            val g = state.groups.firstOrNull { it.id == boxHit.groupId }
-                            if (g != null) onOpenEditor(g)
-                            return@awaitEachGesture
-                        }
                         BoxZone.Body -> {
                             val downMark = TimeSource.Monotonic.markNow()
                             var lastScreen = downScreen
@@ -1402,7 +1486,9 @@ private fun GraphGestures(
                                     val mid = Offset((a.x + b.x) / 2f, (a.y + b.y) / 2f)
                                     val factor = nextScale / state.viewport.scale
                                     if (factor != 1f) {
-                                        state.dispatch(GraphynEditorIntent.UpdateViewportTransform(Offset.Zero, factor, mid))
+                                        // Direct write: library's updateTransform would re-clamp against the
+                                        // 60000-world rect, freezing the zoom to one spot.
+                                        state.viewport = state.viewport.zoomAt(mid, factor, 0.05f, 5f)
                                     }
                                     dragged = true
                                     pressed.forEach { it.consume() }
@@ -1479,7 +1565,8 @@ private fun GraphGestures(
                         val mid = Offset((a.x + b.x) / 2f, (a.y + b.y) / 2f)
                         val factor = nextScale / state.viewport.scale
                         if (factor != 1f) {
-                            state.dispatch(GraphynEditorIntent.UpdateViewportTransform(Offset.Zero, factor, mid))
+                            // Direct write to avoid Graphyn's world clamp pinning the zoom.
+                            state.viewport = state.viewport.zoomAt(mid, factor, 0.05f, 5f)
                         }
                         marqueeStart = null
                         marqueeCurrent = null
@@ -1514,7 +1601,7 @@ private fun GraphGestures(
                             )
                             if (worldDelta != IntOffset.Zero) state.dispatch(GraphynEditorIntent.MoveSelectedNodes(worldDelta))
                         }
-                        DragMode.Pan -> state.dispatch(GraphynEditorIntent.UpdateViewportTransform(delta, 1f, screen))
+                        DragMode.Pan -> state.viewport = state.viewport.panBy(delta)
                         DragMode.Marquee -> marqueeCurrent = screen
                         DragMode.Group -> {}
                     }
