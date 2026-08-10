@@ -66,6 +66,7 @@ import com.ronjunevaldoz.graphyn.core.model.WorkflowType
 import com.ronjunevaldoz.graphyn.core.registry.DefaultNodeSpecRegistry
 import com.ronjunevaldoz.graphyn.core.registry.NodeSpecRegistry
 import com.ronjunevaldoz.graphyn.core.serialization.toJson
+import com.ronjunevaldoz.graphyn.editor.canvas.GraphynCanvasBounds
 import com.ronjunevaldoz.graphyn.editor.canvas.NodeCanvasContext
 import com.ronjunevaldoz.graphyn.editor.canvas.components.GraphynConnectionLayer
 import com.ronjunevaldoz.graphyn.editor.canvas.components.PortCompatibility
@@ -97,7 +98,13 @@ import kotlin.math.roundToInt
 @Composable
 fun CodeGraphView(modifier: Modifier = Modifier) {
     val specs = remember { demoNodeSpecRegistry() }
-    val state = rememberGraphynEditorState(initialWorkflow = demoWorkflow(), nodeSpecs = specs)
+    val state = rememberGraphynEditorState(
+        initialWorkflow = demoWorkflow(),
+        nodeSpecs = specs,
+        // Effectively unlimited world: node placement clamps to [0, 60000] and panning is bound
+        // by this rect, so there is always room to keep placing nodes ("se queda corto el viewport").
+        canvasBounds = GraphynCanvasBounds(width = 60000, height = 60000),
+    )
 
     var menu by remember { mutableStateOf<GraphMenu?>(null) }
     var search by remember { mutableStateOf("") }
@@ -383,7 +390,7 @@ private fun ControlChip(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Chip(text = if (selectMode) "Seleccionar" else "Pan", active = selectMode, onClick = onToggleSelect)
+            Chip(text = "Box Select", active = selectMode, onClick = onToggleSelect)
             Chip(text = "Grupo", active = false, onClick = onGroup)
             Chip(text = "Caja", active = false, onClick = onCaja)
             Chip(text = "Expandir", active = false, onClick = onExpand)
@@ -678,21 +685,20 @@ private fun GraphGestures(
                 }
 
                 // ---- card body grab / pan / marquee ----
+                // Hit-tested against the card's real rendered rect in px (NOT Graphyn's internal
+                // nodeBounds, whose dp-as-px mismatch made only the header strip draggable).
+                val grabbed = hitNodeId(state, nodeSpecs, downWorld, density)
                 val mode = when {
-                    state.isWorldPositionOverNode(downWorld) -> DragMode.Node
+                    grabbed != null -> DragMode.Node
                     selectMode -> DragMode.Marquee
                     else -> DragMode.Pan
                 }
-                if (mode == DragMode.Node) {
-                    val wf = state.workflow
-                    if (wf != null) {
-                        var grabbed: String? = null
-                        for (i in wf.nodes.indices.reversed()) {
-                            if (state.nodeBounds(wf.nodes[i].id, i).contains(downWorld)) { grabbed = wf.nodes[i].id; break }
-                        }
-                        if (grabbed != null && state.effectiveSelectedNodeIds.none { it == grabbed }) {
-                            state.dispatch(GraphynEditorIntent.SelectNode(grabbed))
-                        }
+                if (mode == DragMode.Node && grabbed != null) {
+                    if (selectMode) {
+                        // Box Select: tapping toggles membership, so several nodes build a selection.
+                        state.dispatch(GraphynEditorIntent.ToggleNodeSelection(grabbed))
+                    } else if (state.effectiveSelectedNodeIds.none { it == grabbed }) {
+                        state.dispatch(GraphynEditorIntent.SelectNode(grabbed))
                     }
                 }
 
@@ -758,7 +764,7 @@ private fun GraphGestures(
                 when (mode) {
                     DragMode.Marquee -> {
                         if (dragged && marqueeStart != null) {
-                            finalizeMarquee(state, marqueeStart!!, marqueeCurrent ?: marqueeStart!!)
+                            finalizeMarquee(state, nodeSpecs, density, marqueeStart!!, marqueeCurrent ?: marqueeStart!!)
                         } else {
                             state.selectedNodeIds = emptySet()
                             state.selectedNodeId = null
@@ -801,20 +807,46 @@ private fun GraphGestures(
     }
 }
 
-/** Marquee selection using the layout's exact node bounds. */
-private fun finalizeMarquee(state: GraphynEditorState, startScreen: Offset, endScreen: Offset) {
+/** Marquee selection against each card's real rendered rect (world px). */
+private fun finalizeMarquee(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    density: Density,
+    startScreen: Offset,
+    endScreen: Offset,
+) {
     val a = state.screenToWorld(startScreen)
     val b = state.screenToWorld(endScreen)
     val worldRect = Rect(minOf(a.x, b.x), minOf(a.y, b.y), maxOf(a.x, b.x), maxOf(a.y, b.y))
     val wf = state.workflow ?: return
     val selected = buildSet {
-        wf.nodes.forEachIndexed { i, node ->
-            val r = state.nodeBounds(node.id, i)
+        for (node in wf.nodes) {
+            val r = nodeWorldRect(state, nodeSpecs, node, density) ?: continue
             if (worldRect.overlaps(r) || r.contains(worldRect.topLeft) || r.contains(worldRect.bottomRight)) add(node.id)
         }
     }
     state.selectedNodeIds = selected
     state.selectedNodeId = selected.firstOrNull()
+}
+
+/** World-space rect of a node card exactly as [FieldCardFactory] renders it (240dp wide, height from port rows). */
+private fun nodeWorldRect(state: GraphynEditorState, nodeSpecs: NodeSpecRegistry, node: NodeRef, density: Density): Rect? {
+    val spec = nodeSpecs.resolve(node.type) ?: return null
+    val o = nodeOrigin(state, node)
+    val d = density.density
+    val heightPx = (28f + spec.inputs.size * 22f + 1f + spec.outputs.size * 22f) * d
+    return Rect(o.x, o.y, o.x + 240f * d, o.y + heightPx)
+}
+
+/** Topmost node whose rendered card contains the world point (z-wise last drawn = last in workflow order). */
+private fun hitNodeId(state: GraphynEditorState, nodeSpecs: NodeSpecRegistry, world: Offset, density: Density): String? {
+    val wf = state.workflow ?: return null
+    for (i in wf.nodes.indices.reversed()) {
+        val node = wf.nodes[i]
+        val r = nodeWorldRect(state, nodeSpecs, node, density) ?: continue
+        if (r.contains(world)) return node.id
+    }
+    return null
 }
 
 private fun screenToWorld(state: GraphynEditorState, p: Offset): Offset {
