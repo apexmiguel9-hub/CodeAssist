@@ -28,6 +28,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,6 +43,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ronjunevaldoz.graphyn.core.model.ConnectionRef
@@ -52,8 +56,10 @@ import com.ronjunevaldoz.graphyn.core.model.WorkflowDefinition
 import com.ronjunevaldoz.graphyn.core.model.WorkflowNodePosition
 import com.ronjunevaldoz.graphyn.core.model.WorkflowType
 import com.ronjunevaldoz.graphyn.core.registry.DefaultNodeSpecRegistry
+import com.ronjunevaldoz.graphyn.core.registry.NodeSpecRegistry
 import com.ronjunevaldoz.graphyn.core.serialization.toJson
 import com.ronjunevaldoz.graphyn.editor.canvas.GraphynCanvasSurface
+import com.ronjunevaldoz.graphyn.editor.canvas.components.PortCompatibility
 import com.ronjunevaldoz.graphyn.editor.interaction.GraphynEditorIntent
 import com.ronjunevaldoz.graphyn.editor.state.GraphynEditorState
 import com.ronjunevaldoz.graphyn.editor.state.rememberGraphynEditorState
@@ -85,6 +91,9 @@ fun CodeGraphView(modifier: Modifier = Modifier) {
     Box(modifier) {
         // Full-screen canvas. 1-finger drag pans, 2-finger pinch zooms, drag a port to wire nodes.
         GraphynCanvasSurface(state = state, nodeSpecs = specs)
+
+        // Phase 2: drag-from-port connections with magnet snap + green/red compatibility rings.
+        ConnectOverlay(state = state, nodeSpecs = specs)
 
         // Marquee multi-select overlay (only when the user toggled Pan → Select).
         if (selectMode) MarqueeSelectOverlay(state)
@@ -490,3 +499,240 @@ private fun demoWorkflow() = WorkflowDefinition(
         "n5" to WorkflowNodePosition(x = 1080, y = 440),
     ),
 )
+
+// ------------------------------------------------------------------------------------
+// Phase 2 — Drag-to-connect with magnet + green/red rings.
+//
+// Graphyn's own connect UX is tap-start → tap-target (clickable port dots), which feels off on a
+// phone. This overlay reimplements the Godot-style drag: press an output port, drag a cable, and
+// compatible input ports glow green (red when rejected) while the nearest compatible one inside its
+// row hotzone becomes the magnet snap target. Released on the snap → connection; on another input →
+// nearest port; on empty → cable cancelled (and the output's previous wire is cut, like our engine).
+// Port geometry mirrors the default FieldCardFactory (CARD_W=240, HEADER=28, ROW=22, dp) so rings
+// sit exactly on Graphyn's rendered dots. Everything else (rendering, undo, collapse, serialization)
+// stays in Graphyn.
+// ------------------------------------------------------------------------------------
+
+private const val DragSlopPx = 10f
+private val SnapGreen = Color(0xFF4ADE80)
+private val SnapRed = Color(0xFFE2583C)
+
+private data class WorldPort(
+    val nodeId: String,
+    val portName: String,
+    val spec: PortSpec,
+    val isInput: Boolean,
+    val world: Offset,
+)
+
+private data class RingPort(
+    val screen: Offset,
+    val compatible: Boolean,
+    val isSnap: Boolean,
+)
+
+@Composable
+private fun ConnectOverlay(state: GraphynEditorState, nodeSpecs: NodeSpecRegistry) {
+    var rings by remember { mutableStateOf<List<RingPort>>(emptyList()) }
+    var dragOut by remember { mutableStateOf<Offset?>(null) }
+    val density = LocalDensity.current
+
+    // Clear the rings when the draft disappears (e.g. a patient-port tap-then-tap completes).
+    LaunchedEffect(state.connectionDraft) {
+        if (state.connectionDraft == null) {
+            rings = emptyList()
+            dragOut = null
+        }
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .pointerInput(state, nodeSpecs) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val touch = down.position
+                    val out = hitOutputPort(state, nodeSpecs, screenToWorld(state, touch), density)
+                    if (out != null) {
+                        down.consume()
+                        state.dispatch(GraphynEditorIntent.BeginConnection(out.nodeId, out.portName))
+                        dragOut = worldToScreen(state, out.world)
+                        var began = false
+                        var lastScreen = touch
+                        var snapped: WorldPort? = null
+                        var exited = false
+
+                        while (!exited) {
+                            val ev = awaitPointerEvent()
+                            val pressed = ev.changes.filter { it.pressed }
+                            if (pressed.isEmpty() || pressed.none { it.id == down.id }) {
+                                ev.changes.firstOrNull { it.id == down.id }?.consume()
+                                break
+                            }
+                            if (pressed.size >= 2) {
+                                // Second finger = pinch zoom: cancel the cable and hand the gesture back.
+                                state.dispatch(GraphynEditorIntent.CancelConnection)
+                                exited = true
+                                break
+                            }
+                            val c = pressed.first { it.id == down.id }
+                            val screen = c.position
+                            if (!began && (screen - touch).getDistance() < DragSlopPx) {
+                                c.consume()
+                                continue
+                            }
+                            began = true
+                            snapped = findSnapTarget(state, nodeSpecs, out, screenToWorld(state, screen), density)
+                            val target = snapped?.world ?: screenToWorld(state, screen)
+                            state.dispatch(GraphynEditorIntent.UpdateConnectionDraftPosition(target))
+                            rings = inputRingPorts(state, nodeSpecs, out.spec, snapped, density)
+                            dragOut = worldToScreen(state, out.world)
+                            c.consume()
+                            lastScreen = screen
+                        }
+
+                        rings = emptyList()
+                        dragOut = null
+                        if (exited || !began) {
+                            // Pinch took over, or a plain tap on a port: keep the draft alive so a second
+                            // tap on a target port completes it via Graphyn's own flow.
+                            return@awaitEachGesture
+                        }
+                        if (snapped != null) {
+                            state.dispatch(GraphynEditorIntent.CompleteConnection(snapped!!.nodeId, snapped!!.portName))
+                        } else {
+                            val drop = screenToWorld(state, lastScreen)
+                            val nearest = nearestInputPort(state, nodeSpecs, drop, density)
+                            if (nearest != null && nearest.nodeId != out.nodeId) {
+                                state.dispatch(GraphynEditorIntent.CompleteConnection(nearest.nodeId, nearest.portName))
+                            } else {
+                                // Dropped on empty: cancel; if the output was already wired, cut that wire.
+                                val wire = state.workflow?.connections?.firstOrNull {
+                                    it.fromNodeId == out.nodeId && it.fromPort == out.portName
+                                }
+                                state.dispatch(GraphynEditorIntent.CancelConnection)
+                                if (wire != null) {
+                                    state.selectedConnection = wire
+                                    state.dispatch(GraphynEditorIntent.DeleteSelectedConnection)
+                                }
+                            }
+                        }
+                    }
+                    // Non-port touches fall through to pan / node drag / Graphyn's own flows.
+                }
+            },
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            val ripple = 23f * state.viewport.scale
+            dragOut?.let { drawCircle(Color.White, radius = ripple * 0.8f, center = it) }
+            rings.forEach { rp ->
+                val color = if (rp.compatible) SnapGreen else SnapRed
+                if (rp.isSnap) {
+                    drawCircle(color.copy(alpha = 0.9f), radius = ripple + 3f, center = rp.screen)
+                    drawCircle(Color.White, radius = ripple - 5f, center = rp.screen)
+                } else {
+                    drawCircle(color.copy(alpha = 0.85f), radius = ripple, center = rp.screen)
+                    drawCircle(color, radius = ripple, center = rp.screen, style = Stroke(width = 3f))
+                }
+            }
+        }
+    }
+}
+
+private fun screenToWorld(state: GraphynEditorState, p: Offset): Offset {
+    val vp = state.viewport
+    return Offset((p.x - vp.offset.x) / vp.scale, (p.y - vp.offset.y) / vp.scale)
+}
+
+private fun worldToScreen(state: GraphynEditorState, w: Offset): Offset {
+    val vp = state.viewport
+    return Offset(w.x * vp.scale + vp.offset.x, w.y * vp.scale + vp.offset.y)
+}
+
+private fun nodeOrigin(state: GraphynEditorState, node: NodeRef): Offset {
+    val p = state.nodePositionsByNodeId[node.id]
+        ?: state.workflow?.nodePositions?.get(node.id)?.let { IntOffset(it.x, it.y) }
+        ?: return Offset.Zero
+    return Offset(p.x.toFloat(), p.y.toFloat())
+}
+
+/** All input/output ports in world space, positioned exactly where Graphyn renders their dots. */
+private fun worldPorts(state: GraphynEditorState, nodeSpecs: NodeSpecRegistry, density: Density): List<WorldPort> {
+    val wf = state.workflow ?: return emptyList()
+    val cardW = 240f * density.density
+    return buildList {
+        for (node in wf.nodes) {
+            val spec = nodeSpecs.resolve(node.type) ?: continue
+            val o = nodeOrigin(state, node)
+            spec.inputs.forEachIndexed { i, p ->
+                val y = 28f + i * 22f + 11f
+                add(WorldPort(node.id, p.name, p, true, Offset(o.x, o.y + y * density.density)))
+            }
+            spec.outputs.forEachIndexed { i, p ->
+                val y = 28f + spec.inputs.size * 22f + 1f + i * 22f + 11f
+                add(WorldPort(node.id, p.name, p, false, Offset(o.x + cardW, o.y + y * density.density)))
+            }
+        }
+    }
+}
+
+/** Godot-style row hotzone: height = ROW, and it sticks out of the card edge so it's easy to grab. */
+private fun portHotRect(wp: WorldPort, density: Density): Rect {
+    val inner = 20f * density.density
+    val outer = 26f * density.density
+    val row = 22f * density.density
+    val left = if (wp.isInput) wp.world.x - outer else wp.world.x - inner
+    return Rect(left, wp.world.y - row / 2f, left + inner + outer, wp.world.y + row / 2f)
+}
+
+private fun hitOutputPort(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    world: Offset,
+    density: Density,
+): WorldPort? =
+    worldPorts(state, nodeSpecs, density)
+        .asReversed()
+        .firstOrNull { !it.isInput && portHotRect(it, density).contains(world) }
+
+private fun inputRingPorts(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    srcPort: PortSpec,
+    snap: WorldPort?,
+    density: Density,
+): List<RingPort> =
+    worldPorts(state, nodeSpecs, density)
+        .filter { it.isInput }
+        .mapNotNull { wp ->
+            val compatible = PortCompatibility.isCompatible(wp.spec, srcPort)
+            RingPort(
+                screen = worldToScreen(state, wp.world),
+                compatible = compatible,
+                isSnap = snap != null && snap.nodeId == wp.nodeId && snap.portName == wp.portName,
+            )
+        }
+
+/** Magnet: nearest compatible input whose row-hotzone contains the pointer. */
+private fun findSnapTarget(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    out: WorldPort,
+    world: Offset,
+    density: Density,
+): WorldPort? =
+    worldPorts(state, nodeSpecs, density)
+        .filter { it.isInput && it.nodeId != out.nodeId && PortCompatibility.isCompatible(it.spec, out.spec) }
+        .filter { portHotRect(it, density).contains(world) }
+        .minByOrNull { (world - it.world).getDistance() }
+
+/** Nearest input port whose hotzone contains the point (used as the release fallback). */
+private fun nearestInputPort(
+    state: GraphynEditorState,
+    nodeSpecs: NodeSpecRegistry,
+    world: Offset,
+    density: Density,
+): WorldPort? =
+    worldPorts(state, nodeSpecs, density)
+        .filter { it.isInput && portHotRect(it, density).contains(world) }
+        .minByOrNull { (world - it.world).getDistance() }
