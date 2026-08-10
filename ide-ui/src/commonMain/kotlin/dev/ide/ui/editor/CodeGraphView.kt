@@ -364,6 +364,9 @@ private fun GraphBoxLayer(
     state.groups.forEachIndexed { index, group ->
         val collapsed = group.id in collapsedIds
         val rect = groupWorldRect(state, nodeSpecs, group, collapsed, density) ?: return@forEachIndexed
+        // Mini-card grid computed OUTSIDE the Box composable lambda: an early return from inside a
+        // composable lambda confuses the Compose compiler ("Non-mapped local declaration tmp2_marker").
+        val slots = if (collapsed) emptyList<MiniSlot>() else groupMiniSlots(state, nodeSpecs, group, density) ?: emptyList<MiniSlot>()
         val fc = groupColors[index % groupColors.size]
         val bc = groupBorderColors[index % groupBorderColors.size]
         val corner = CornerRadius(12f * density.density)
@@ -397,19 +400,16 @@ private fun GraphBoxLayer(
                 color = bc,
                 fontSize = 11.sp,
             )
-            if (!collapsed) {
-                val slots = groupMiniSlots(state, nodeSpecs, group, density) ?: return@forEachIndexed
-                slots.forEach { slot ->
-                    Box(Modifier.offset { IntOffset(slot.x.roundToInt(), slot.y.roundToInt()) }) {
-                        Box(
-                            Modifier.graphicsLayer {
-                                transformOrigin = TransformOrigin(0f, 0f)
-                                scaleX = MiniScale
-                                scaleY = MiniScale
-                            },
-                        ) {
-                            CardView(state = state, node = slot.node, spec = slot.spec)
-                        }
+            slots.forEach { slot ->
+                Box(Modifier.offset { IntOffset(slot.x.roundToInt(), slot.y.roundToInt()) }) {
+                    Box(
+                        Modifier.graphicsLayer {
+                            transformOrigin = TransformOrigin(0f, 0f)
+                            scaleX = MiniScale
+                            scaleY = MiniScale
+                        },
+                    ) {
+                        CardView(state = state, node = slot.node, spec = slot.spec)
                     }
                 }
             }
