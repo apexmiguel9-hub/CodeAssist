@@ -3,7 +3,6 @@ package dev.ide.lang.kotlin
 import dev.ide.block.BlockNode
 import dev.ide.block.BlockPart
 import dev.ide.block.BlockTemplate
-import dev.ide.block.BlockId
 import dev.ide.block.InsertTemplate
 import dev.ide.block.SlotCategory
 import dev.ide.block.SlotRef
@@ -81,7 +80,7 @@ class KotlinBlockProjectionTest {
         val slotIndex = body.slots.indexOfFirst { it.multiple }
         assertTrue(slotIndex >= 0, "body has a multiple statement slot")
         val insert = InsertTemplate(
-            at = SlotRef(BlockId(body.id), slotIndex, 0),
+            at = SlotRef(body.id, slotIndex, 0),
             template = BlockTemplate("println", SlotCategory.STATEMENT, "println(█)"),
         )
         val edits = engine.computeEdit(tree, src, insert)
