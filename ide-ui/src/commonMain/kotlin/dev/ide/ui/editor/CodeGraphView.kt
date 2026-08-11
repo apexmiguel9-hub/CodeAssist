@@ -276,7 +276,7 @@ private fun GraphCanvas(
                 // afterwards the user's pans/zooms take over.
                 if (initialFit && it.width > 0 && it.height > 0) {
                     initialFit = false
-                    fitToVisibleContent(state, nodeSpecs, density, it)
+                    fitToVisibleContent(state, nodeSpecs, collapsedIds, density, it)
                 }
             },
     ) {
@@ -499,6 +499,8 @@ private fun BoxOutputDraftLayer(
     val start = groupVirtualPort(state, nodeSpecs, group, group.id in collapsedIds, density) ?: return
     val end = state.connectionDraftPosition ?: Offset(start.x + 120f, start.y)
     val stroke = 3f * density.density
+    // GraphynDs.colors is a @Composable-backed property: resolve it OUTSIDE the draw lambda.
+    val color = GraphynDs.colors.connectionLine.copy(alpha = 0.35f)
     Canvas(modifier) {
         val distance = (end.x - start.x).absoluteValue.coerceAtLeast(120f)
         val direction = if (end.x >= start.x) 1f else -1f
@@ -507,7 +509,7 @@ private fun BoxOutputDraftLayer(
             moveTo(start.x, start.y)
             cubicTo(start.x + control * direction, start.y, end.x - control * direction, end.y, end.x, end.y)
         }
-        drawPath(path, GraphynDs.colors.connectionLine.copy(alpha = 0.35f), style = Stroke(width = stroke))
+        drawPath(path, color, style = Stroke(width = stroke))
     }
 }
 
@@ -615,6 +617,7 @@ private fun groupWorldRect(
 private fun fitToVisibleContent(
     state: GraphynEditorState,
     nodeSpecs: NodeSpecRegistry,
+    collapsedIds: Set<String>,
     density: Density,
     canvasSize: IntSize,
 ) {
@@ -631,7 +634,7 @@ private fun fitToVisibleContent(
         nodeWorldRect(state, nodeSpecs, node, density)?.let { rects += it }
     }
     state.groups.forEach { g ->
-        groupWorldRect(state, nodeSpecs, g, g.collapsed, density)?.let { rects += it }
+        groupWorldRect(state, nodeSpecs, g, g.id in collapsedIds, density)?.let { rects += it }
     }
     if (rects.isEmpty()) {
         state.viewport = GraphynViewport(Offset.Zero, 1f)
