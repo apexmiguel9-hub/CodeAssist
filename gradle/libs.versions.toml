@@ -31,7 +31,7 @@ admobMediationMeta = "6.22.0.0"        # com.google.ads.mediation:facebook — M
 admobMediationPangle = "8.2.0.4.0"     # com.google.ads.mediation:pangle — Pangle adapter (native-capable)
 admobMediationMintegral = "17.1.71.0"  # com.google.ads.mediation:mintegral — Mintegral adapter (native-capable)
 androidStub = "4.1.1.4"     # com.google.android:android — the throwaway stub android.jar (compileOnly) :applog-runtime compiles against
-okhttp = "4.12.0"           # com.squareup.okhttp3 — HTTP + SSE transport for the agent's LLM client (:agent-impl); runs on JVM and ART
+okhttp = "5.3.2"           # com.squareup.okhttp3 — HTTP + SSE transport for the agent's LLM client (:agent-impl); runs on JVM and ART. 5.3.2 = the version the AdMob mediation SDKs (Mintegral/Pangle) already pull into the APK dex; keeping okhttp-sse on the SAME version avoids the 4.12/5.x internal/Util NoClassDefFoundError.
 # The Model Context Protocol Java SDK (io.modelcontextprotocol.sdk:mcp) — the wire protocol for
 # :agent-mcp's stdio server. 2.0.0 tracks the 2025-11-25 spec; the `mcp` bundle pulls mcp-core + Jackson 3.
 mcp = "2.0.0"
